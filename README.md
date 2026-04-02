@@ -1,5 +1,7 @@
 # MindPalace: 7-Layer Agent Memory Ecosystem
 
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Rust](https://img.shields.io/badge/language-Rust-orange.svg) ![Status: Active](https://img.shields.io/badge/Status-Active-brightgreen.svg) ![Memory Architecture: 7-Layer](https://img.shields.io/badge/Architecture-7--Layer-magenta.svg)
+
 **MindPalace** is a high-performance, modular memory architecture for autonomous AI agents, built entirely in Rust. It utilizes a "Defense-in-Depth" strategy to manage large context windows, maximize prompt cache efficiency, and maintain long-term knowledge through background consolidation.
 
 ## 🧠 The 7-Layer Architecture
