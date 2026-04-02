@@ -1,0 +1,21 @@
+[package]
+name = "brain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mem-core = { path = "../mem-core" }
+mem-offloader = { path = "../mem-offloader" }
+mem-micro = { path = "../mem-micro" }
+mem-session = { path = "../mem-session" }
+mem-compactor = { path = "../mem-compactor" }
+mem-extractor = { path = "../mem-extractor" }
+mem-dreamer = { path = "../mem-dreamer" }
+mem-bridge = { path = "../mem-bridge" }
+tokio = { workspace = true, features = ["full"] }
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true

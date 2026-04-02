@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/mem-core",
+    "crates/mem-offloader",
+    "crates/mem-micro",
+    "crates/mem-session",
+    "crates/mem-compactor",
+    "crates/mem-extractor",
+    "crates/mem-dreamer",
+    "crates/mem-bridge",
+    "crates/brain",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["MindPalace Authors"]
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+fs4 = "0.8" # For PID-level locking
+sha2 = "0.10" # For content addressing
+futures = "0.3"
+async-trait = "0.1"
+tempfile = "3.8"
+chrono = "0.4"
+zstd = "0.13"

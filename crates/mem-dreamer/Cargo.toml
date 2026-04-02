@@ -1,0 +1,21 @@
+[package]
+name = "mem-dreamer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mem-core = { path = "../mem-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+fs4.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tempfile.workspace = true

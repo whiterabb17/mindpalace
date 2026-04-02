@@ -1,0 +1,15 @@
+[package]
+name = "mem-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full", "fs"] }
+async-trait.workspace = true
+zstd.workspace = true
