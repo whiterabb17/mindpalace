@@ -52,8 +52,8 @@ impl<S: StorageBackend> MemoryLayer for ToolOffloader<S> {
                         // 2. Persist to storage (Shared Backend)
                         self.storage.store(&id, item.content.as_bytes()).await?;
 
-                        // 3. Create context-friendly stub
-                        let preview = &item.content[..self.config.preview_len.min(item.content.len())];
+                        // 3. Create context-friendly stub (Unicode-safe preview)
+                        let preview: String = item.content.chars().take(self.config.preview_len).collect();
                         item.content = format!(
                             "[Large Output Offloaded to Storage. Hash: {}. Preview: {}...]",
                             hash, preview

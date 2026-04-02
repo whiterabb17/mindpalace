@@ -55,34 +55,45 @@ impl<S: StorageBackend> DreamWorker<S> {
         }
 
         // 2. Scan for finalized sessions (L5 extracted but not yet L6 consolidated)
-        // Scaffolding logic: targeting a session marked for archival
-        let session_id = "sessions/legacy_001.json";
-        if self.storage.exists(session_id).await {
-            let data = self.storage.retrieve(session_id).await?;
-            let context: Context = serde_json::from_slice(&data)?;
-
-            // 3. Synthesis: Deep-review of legacy conversations.
-            let mut history = String::new();
-            for item in &context.items {
-                history.push_str(&format!("{:?}: {}\n", item.role, item.content));
+        let sessions = self.storage.list("sessions/").await?;
+        
+        for session_name in sessions {
+            if !session_name.ends_with(".json") { continue; }
+            
+            let session_id = format!("sessions/{}", session_name);
+            let archive_id = format!("archive/{}.zst", session_name);
+            
+            // Skip if already archived to avoid redundant Zstd work
+            if self.storage.exists(&archive_id).await {
+                continue;
             }
 
-            let prompt = format!(
-                "CONSOLIDATE MEMORY: Review the history and synthesize any major contradictions \
-                or new high-level knowledge for the knowledge.json base.\n\n\
-                HISTORY:\n{}",
-                history
-            );
+            let data = self.storage.retrieve(&session_id).await?;
+            let context: Result<Context, _> = serde_json::from_slice(&data);
+            
+            if let Ok(context) = context {
+                // 3. Synthesis: Deep-review of conversation history.
+                let mut history = String::new();
+                for item in &context.items {
+                    history.push_str(&format!("{:?}: {}\n", item.role, item.content));
+                }
 
-            // Execute synthesis (Token-capped in real implementation)
-            let _synthesis = self.llm.completion(&prompt).await?;
-            
-            // 4. Archive with Compression: Store as JSON + Zstd for space efficiency.
-            let compressed_data = utils::compress(&data)?;
-            let archive_id = format!("archive/legacy_001.json.zst");
-            self.storage.store(&archive_id, &compressed_data).await?;
-            
-            tracing::info!("Successfully consolidated and archived session legacy_001.");
+                let prompt = format!(
+                    "CONSOLIDATE MEMORY: Review the history and synthesize any major contradictions \
+                    or new high-level knowledge for the knowledge.json base.\n\n\
+                    HISTORY:\n{}",
+                    history
+                );
+
+                // Execute synthesis (Token-capped in real implementation)
+                let _synthesis = self.llm.completion(&prompt).await?;
+                
+                // 4. Archive with Compression: Store as JSON + Zstd for space efficiency.
+                let compressed_data = utils::compress(&data)?;
+                self.storage.store(&archive_id, &compressed_data).await?;
+                
+                tracing::info!("Successfully consolidated and archived session: {}", session_name);
+            }
         }
 
         // 5. Release Lock

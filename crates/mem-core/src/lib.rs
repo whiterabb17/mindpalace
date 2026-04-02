@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +49,7 @@ pub trait StorageBackend: Send + Sync {
     async fn store(&self, id: &str, data: &[u8]) -> anyhow::Result<()>;
     async fn retrieve(&self, id: &str) -> anyhow::Result<Vec<u8>>;
     async fn exists(&self, id: &str) -> bool;
+    async fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>>;
 }
 
 #[derive(Clone)]
@@ -80,11 +82,52 @@ impl StorageBackend for FileStorage {
     async fn exists(&self, id: &str) -> bool {
         self.root.join(id).exists()
     }
+
+    async fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        let scan_path = self.root.join(prefix);
+        if !scan_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries = Vec::new();
+        let mut read_dir = tokio::fs::read_dir(scan_path).await?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            if let Some(name) = entry.file_name().to_str() {
+                entries.push(name.to_string());
+            }
+        }
+        Ok(entries)
+    }
 }
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     async fn completion(&self, prompt: &str) -> anyhow::Result<String>;
+}
+
+pub struct RetryLlm {
+    pub inner: Arc<dyn LlmClient>,
+    pub max_retries: usize,
+}
+
+impl RetryLlm {
+    pub fn new(inner: Arc<dyn LlmClient>, max_retries: usize) -> Self {
+        Self { inner, max_retries }
+    }
+}
+
+#[async_trait]
+impl LlmClient for RetryLlm {
+    async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
+        use tokio_retry::Retry;
+        use tokio_retry::strategy::{ExponentialBackoff, jitter};
+
+        let strategy = ExponentialBackoff::from_millis(500)
+            .map(jitter)
+            .take(self.max_retries);
+
+        Retry::spawn(strategy, || self.inner.completion(prompt)).await
+    }
 }
 
 pub mod utils {

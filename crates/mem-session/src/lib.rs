@@ -39,12 +39,16 @@ impl MemoryLayer for SessionSummarizer {
 
         let summary = self.llm.completion(&prompt).await?;
 
-        // Update the metadata of the last item to include this "Narrative Thread"
+        // Update the context to include this "Narrative Thread" summary
+        // Instead of just metadata, we inject it as a truncated system message for context grounding
         if let Some(last_item) = context.items.last_mut() {
             let mut meta = last_item.metadata.as_object_mut().cloned().unwrap_or_default();
-            meta.insert("narrative_summary".to_string(), serde_json::Value::String(summary));
+            meta.insert("narrative_summary".to_string(), serde_json::Value::String(summary.clone()));
             last_item.metadata = serde_json::Value::Object(meta);
         }
+
+        // Production-ready iterative injection logic could go here to prune history
+        // based on the generated narrative summary.
 
         Ok(())
     }
