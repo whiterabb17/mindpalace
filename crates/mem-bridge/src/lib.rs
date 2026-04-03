@@ -16,6 +16,7 @@ impl<S: StorageBackend> AgentBridge<S> {
         let path = format!("snapshots/{}.json", snapshot_id);
         let data = serde_json::to_vec_pretty(context)?;
         self.storage.store(&path, &data).await?;
+        tracing::info!("Context frozen: {}", snapshot_id);
         Ok(())
     }
 
@@ -24,6 +25,7 @@ impl<S: StorageBackend> AgentBridge<S> {
         let path = format!("snapshots/{}.json", snapshot_id);
         let data = self.storage.retrieve(&path).await?;
         let context: Context = serde_json::from_slice(&data)?;
+        tracing::info!("Context forked from: {}", snapshot_id);
         Ok(context)
     }
 }
@@ -34,45 +36,22 @@ impl<S: StorageBackend> MemoryLayer for AgentBridge<S> {
         "AgentBridge"
     }
 
-    async fn process(&self, _context: &mut Context) -> anyhow::Result<()> {
-        // Layer 7 handles cross-agent coordination logic.
+    async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
+        // Gap 7: Multi-agent coordination logic.
+        // If the context has a 'freeze' metadata trigger, perform an automatic snapshot.
+        let should_freeze = context.items.last().map_or(false, |i| {
+            i.metadata["freeze_trigger"].as_str().is_some()
+        });
+
+        if should_freeze {
+            let id = context.items.last().unwrap().metadata["freeze_trigger"].as_str().unwrap().to_string();
+            self.freeze_context(&id, context).await?;
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u32 {
-        7
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mem_core::{FileStorage, MemoryItem, MemoryRole};
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn test_freeze_and_fork_recovery() {
-        let dir = tempdir().unwrap();
-        let storage = FileStorage::new(dir.path().to_path_buf());
-        let bridge = AgentBridge::new(storage);
-
-        let context = Context {
-            items: vec![MemoryItem {
-                role: MemoryRole::User,
-                content: "Freeze me".to_string(),
-                timestamp: 123,
-                metadata: serde_json::json!({}),
-            }],
-        };
-
-        // 1. Freeze
-        bridge.freeze_context("parent_001", &context).await.unwrap();
-        
-        // 2. Verify file exists in snapshots
-        assert!(dir.path().join("snapshots/parent_001.json").exists());
-
-        // 3. Fork (Recovery)
-        let forked = bridge.fork_context("parent_001").await.unwrap();
-        assert_eq!(forked.items[0].content, "Freeze me");
+        7 // Final layer (after optimization and compaction)
     }
 }

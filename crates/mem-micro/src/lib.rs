@@ -1,49 +1,95 @@
-use mem_core::{MemoryLayer, Context, MemoryRole};
+use mem_core::{MemoryLayer, Context, MemoryRole, RelevanceAnalyzer};
 use async_trait::async_trait;
+use std::sync::Arc;
 
-pub struct MicroCompactor {
-    /// Maximum character length before aggressive pruning (Skeletonization)
-    pub max_chars: usize,
-    /// Time-To-Live for non-system messages in seconds (default: 3600)
-    pub ttl_seconds: u64,
+/// Strategy for determining how a memory item's Time-To-Live (TTL) decays over time.
+pub enum TTLDecayStrategy {
+    /// Linear decay based on a fixed slope (age * slope).
+    Linear { slope: f32 },
+    /// Exponential decay based on a specified half-life in seconds.
+    Exponential { half_life: u64 },
+    /// Dynamically adjusts TTL based on message role and context relevance scores.
+    AdaptiveByType,
 }
 
-impl Default for MicroCompactor {
-    fn default() -> Self {
-        Self { 
-            max_chars: 20_000,
-            ttl_seconds: 3600, 
+/// A short-term memory layer that prunes context based on age and local relevance.
+///
+/// Unlike naive TTL, the AdaptiveMicroCompactor uses a `RelevanceAnalyzer` to 
+/// provide "stickiness" to important recent messages, extending their TTL 
+/// even if they exceed the base age threshold.
+pub struct AdaptiveMicroCompactor {
+    /// The base TTL in seconds.
+    pub base_ttl: u64,
+    /// Strategy to apply when calculating the effective TTL.
+    pub decay_function: TTLDecayStrategy,
+    /// Analyzer for determining a message's importance to the current task.
+    pub relevance_analyzer: Arc<dyn RelevanceAnalyzer>,
+}
+
+impl AdaptiveMicroCompactor {
+    /// Initializes a new AdaptiveMicroCompactor with the specified base TTL and decay strategy.
+    pub fn new(base_ttl: u64, decay_function: TTLDecayStrategy, relevance_analyzer: Arc<dyn RelevanceAnalyzer>) -> Self {
+        Self {
+            base_ttl,
+            decay_function,
+            relevance_analyzer,
         }
     }
 }
 
 #[async_trait]
-impl MemoryLayer for MicroCompactor {
+impl MemoryLayer for AdaptiveMicroCompactor {
     fn name(&self) -> &str {
-        "MicroCompactor"
+        "AdaptiveMicroCompactor"
     }
 
+    /// Prunes stale items from the context based on their age and relevance.
+    ///
+    /// System-level messages are always retained (immortal).
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
         let now = chrono::Utc::now().timestamp() as u64;
+        
+        let mut to_remove = Vec::new();
 
-        // TTL-based Eviction: Remove old non-system messages
-        context.items.retain(|item| {
-            match item.role {
-                MemoryRole::System => true, // System messages are immortal
-                _ => (now - item.timestamp) < self.ttl_seconds,
+        for (idx, item) in context.items.iter().enumerate() {
+            // Preservation policy: Always keep System messages.
+            if item.role == MemoryRole::System {
+                continue;
             }
-        });
 
-        // Whitespace & Metadata Skeletonization (Optional/Future: could be added here)
-        for item in &mut context.items {
-            if item.content.len() > self.max_chars {
-                // Aggressive skeletonization logic would go here
+            let age = now.saturating_sub(item.timestamp);
+            let relevance = self.relevance_analyzer.score_relevance(item, context).await?;
+            
+            // Adjust TTL based on relevance and the chosen strategy.
+            let effective_ttl = match &self.decay_function {
+                TTLDecayStrategy::AdaptiveByType => {
+                    // Relevance boost: Keep high-relevance items up to 3x longer.
+                    (self.base_ttl as f32 * (1.0 + relevance * 2.0)) as u64
+                }
+                TTLDecayStrategy::Exponential { half_life } => {
+                    let decay = 2_f32.powf(-(age as f32) / (*half_life as f32));
+                    (self.base_ttl as f32 * decay * (1.0 + relevance)) as u64
+                }
+                TTLDecayStrategy::Linear { slope } => {
+                    let decay = (1.0 - (age as f32 * slope)).max(0.0);
+                    (self.base_ttl as f32 * decay * (1.0 + relevance)) as u64
+                }
+            };
+            
+            if age > effective_ttl {
+                to_remove.push(idx);
             }
         }
-
+        
+        // Remove stale items in reverse order to preserve indexing stability.
+        for idx in to_remove.into_iter().rev() {
+            context.items.remove(idx);
+        }
+        
         Ok(())
     }
 
+    /// Higher priority: Micro-compaction should run early to prune obvious noise.
     fn priority(&self) -> u32 {
         2
     }

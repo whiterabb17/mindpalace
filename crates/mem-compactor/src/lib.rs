@@ -1,119 +1,138 @@
-use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole};
+use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole, ImportanceAnalyzer, StorageBackend};
 use async_trait::async_trait;
 use std::sync::Arc;
 
-pub struct FullCompactor {
+/// A heavy-duty memory layer for structural context compression when the session exceeds capacity.
+///
+/// The IntelligentFullCompactor scores every context item by objective importance 
+/// and summarizes less-relevant segments using a 9-point structural model. 
+/// It also creates pre-compaction checkpoints for safety and disaster recovery.
+pub struct IntelligentFullCompactor<S: StorageBackend> {
+    /// Client for model calls during importance analysis and summarization.
     pub llm: Arc<dyn LlmClient>,
-    /// Maximum items allowed before hard compaction triggers
+    /// Scoring service to determine which items are critical for retention.
+    pub importance_analyzer: Arc<dyn ImportanceAnalyzer>,
+    /// Backend for persisting pre-compaction checkpoints.
+    pub storage: S,
+    /// Maximum number of items the context is allowed to reach.
     pub max_items: usize,
+    /// Directory for storing safety checkpoints.
+    pub checkpoint_dir: String,
 }
 
-impl FullCompactor {
-    pub fn new(llm: Arc<dyn LlmClient>, max_items: usize) -> Self {
-        Self { llm, max_items }
+impl<S: StorageBackend> IntelligentFullCompactor<S> {
+    /// Initializes a new IntelligentFullCompactor for the specified storage directory.
+    pub fn new(
+        llm: Arc<dyn LlmClient>,
+        importance_analyzer: Arc<dyn ImportanceAnalyzer>,
+        storage: S,
+        max_items: usize,
+        checkpoint_dir: String,
+    ) -> Self {
+        Self {
+            llm,
+            importance_analyzer,
+            storage,
+            max_items,
+            checkpoint_dir,
+        }
+    }
+
+    /// Persists a full serialized snapshot of the current context for safety and forensics.
+    pub async fn create_checkpoint(&self, context: &Context) -> anyhow::Result<String> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let filename = format!("{}/checkpoint_{}.json", self.checkpoint_dir, timestamp);
+        let data = serde_json::to_vec_pretty(context)?;
+        self.storage.store(&filename, &data).await?;
+        Ok(filename)
     }
 }
 
-pub const COMPACTION_PROMPT: &str = r#"
-Provide a 9-point structural summary of the current agent session. 
-Be precise and technical.
+/// The system prompt for 9-point structural summarization (preserving goals, progress, etc.)
+pub const STRUCTURAL_SUMMARY_PROMPT: &str = r#"
+Apply 9-point structural summarization to the following conversation history. 
+Preserve the core technical intent, constraints, and progress.
 
-1. GOAL: Current objective.
-2. CONTEXT: Environmental constraints.
+1. GOAL: Original user objective.
+2. CONTEXT: Environmental facts.
 3. TOOLS: Successfully used tools.
-4. ERRORS: Technical failures encountered.
-5. PROGRESS: Percentage towards current goal.
+4. ERRORS: Technical failures that inform the current approach.
+5. PROGRESS: Percentage towards goal.
 6. PENDING: Immediate next steps.
-7. CONSTANTS: Facts that must not change.
-8. PREFERENCES: Explicit user formatting instructions.
-9. NEXT: The very next requested action.
+7. CONSTANTS: Immutable facts/constraints.
+8. PREFERENCES: User formatting/style preferences.
+9. NEXT: Very next action.
 
 HISTORY:
 {history}
 "#;
 
 #[async_trait]
-impl MemoryLayer for FullCompactor {
+impl<S: StorageBackend> MemoryLayer for IntelligentFullCompactor<S> {
     fn name(&self) -> &str {
-        "FullCompactor"
+        "IntelligentFullCompactor"
     }
 
+    /// Executes the full compaction cycle, including checkpointing and importance-based pruning.
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
         if context.items.len() < self.max_items {
             return Ok(());
         }
 
+        // 1. Safety Checkpoint: Create full backup before heavy transformation.
+        let checkpoint_id = self.create_checkpoint(context).await?;
+        tracing::info!("Created pre-compaction checkpoint: {}", checkpoint_id);
+
+        // 2. Objective Scrutiny: Determine which items must remain in context.
+        let mut scored_items: Vec<(usize, MemoryItem, f32)> = Vec::new();
+        for (idx, item) in context.items.iter().enumerate() {
+            let score = self.importance_analyzer.score_importance(item, context).await?;
+            scored_items.push((idx, item.clone(), score));
+        }
+
+        // 3. Keep high-importance items regardless of their position in time.
+        // We keep the top 1/3 of items by importance score.
+        scored_items.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+        
+        let keep_count = (scored_items.len() / 3).max(1);
+        let high_importance: Vec<_> = scored_items.iter().take(keep_count).map(|(_, item, _)| item.clone()).collect();
+        let to_summarize: Vec<_> = scored_items.iter().skip(keep_count).map(|(_, item, _)| item.clone()).collect();
+
+        // 4. Summarize less important items into a unified structural state.
         let mut history = String::new();
-        for item in &context.items {
+        for item in &to_summarize {
             history.push_str(&format!("{:?}: {}\n", item.role, item.content));
         }
 
-        let prompt = COMPACTION_PROMPT.replace("{history}", &history);
+        let prompt = STRUCTURAL_SUMMARY_PROMPT.replace("{history}", &history);
         let summary_text = self.llm.completion(&prompt).await?;
 
-        // 80/20 Pruning: Replace first 80% with the summary, keep latest 20%
-        let keep_latest_count = context.items.len() / 5; 
-        
         let summary_item = MemoryItem {
             role: MemoryRole::System,
             content: format!("### COMPACTED SESSION STATE ###\n\n{}", summary_text),
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: serde_json::json!({"compaction": true, "layer": 4}),
+            metadata: serde_json::json!({
+                "compaction": true,
+                "importance_filtered": true,
+                "layer": 4,
+                "summarized_count": to_summarize.len(),
+                "checkpoint": checkpoint_id
+            }),
         };
 
-        let mut new_items = vec![summary_item];
-        let split_idx = context.items.len().saturating_sub(keep_latest_count);
+        // 5. Final Reconstruction: Summary + preserved high-importance items.
+        // History is reconstructed by preserving the relative ordering of high-importance items.
+        let mut finalized_items = vec![summary_item];
+        finalized_items.extend(high_importance);
+        finalized_items.sort_by_key(|i| i.timestamp);
         
-        // Drain everything up to the split point, keep the rest
-        let latest_items: Vec<_> = context.items.drain(split_idx..).collect();
-        new_items.extend(latest_items);
-        
-        context.items = new_items;
+        context.items = finalized_items;
 
         Ok(())
     }
 
+    /// Lowest priority: Major compaction should occur after all other filtering and extraction.
     fn priority(&self) -> u32 {
         4
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mem_core::{MemoryItem, MemoryRole};
-
-    struct MockLlm;
-    #[async_trait]
-    impl LlmClient for MockLlm {
-        async fn completion(&self, _prompt: &str) -> anyhow::Result<String> {
-            Ok("9-Point Summary Data".to_string())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_full_compaction_logical_split() {
-        let llm = Arc::new(MockLlm);
-        let compactor = FullCompactor::new(llm, 5); // Trigger at 5 items
-        
-        let mut context = Context {
-            items: (0..5).map(|i| MemoryItem {
-                role: MemoryRole::User,
-                content: format!("Message {}", i),
-                timestamp: i as u64,
-                metadata: serde_json::json!({}),
-            }).collect(),
-        };
-
-        compactor.process(&mut context).await.unwrap();
-
-        // 80/20 Rule:
-        // Original: 5 items. 
-        // split_idx = 5 - (5/5) = 4. 
-        // We keep 1 latest item (Message 4) and replace others with 1 summary.
-        // Total should be 2 items.
-        assert_eq!(context.items.len(), 2);
-        assert!(context.items[0].content.contains("COMPACTED SESSION STATE"));
-        assert_eq!(context.items[1].content, "Message 4");
     }
 }

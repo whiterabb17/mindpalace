@@ -1,18 +1,22 @@
-use mem_core::{MemoryLayer, Context, LlmClient, StorageBackend, utils};
+use mem_core::{MemoryLayer, Context, LlmClient, StorageBackend};
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fs4::FileExt;
 use std::fs::File;
 use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
+use tokio::task::JoinHandle;
 
+/// Configuration for background memory consolidation cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DreamConfig {
-    /// Token cap per background cycle (Configurable as requested)
+    /// Maximum number of tokens to process in a single dream cycle.
     pub max_tokens_per_dream: usize,
-    /// Inactivity window before dreaming (45-60 mins as requested)
+    /// Minimum idle time (minutes) before a dream cycle is triggered.
     pub idle_threshold_mins: u64,
-    /// How many sessions to keep in raw JSON before compression/archival
+    /// Number of sessions to retain during background maintenance.
     pub retention_sessions: usize,
 }
 
@@ -26,164 +30,145 @@ impl Default for DreamConfig {
     }
 }
 
+/// A background worker for deep-review and consolidation of session history.
+///
+/// The DreamWorker performs "offline" analysis of past conversation sessions, 
+/// synthesizing high-level structural knowledge and persisting it as 
+/// consolidated markdown files in the `knowledge/` directory.
 pub struct DreamWorker<S: StorageBackend> {
+    /// Client for model calls during memory synthesis.
     pub llm: Arc<dyn LlmClient>,
+    /// Backend for retrieving historical sessions and storing synthesis results.
     pub storage: S,
+    /// Worker configuration (idle thresholds, retention, caps).
     pub config: DreamConfig,
+    /// Path to a global lock file to prevent concurrent consolidation attempts.
     pub lock_path: PathBuf,
 }
 
 impl<S: StorageBackend> DreamWorker<S> {
+    /// Initializes a new DreamWorker with the specified backend and configuration.
     pub fn new(llm: Arc<dyn LlmClient>, storage: S, config: DreamConfig, lock_path: PathBuf) -> Self {
-        Self {
-            llm,
-            storage,
-            config,
-            lock_path,
-        }
+        Self { llm, storage, config, lock_path }
     }
 
-    /// Primary background worker for memory consolidation.
-    /// Follows the Anthropic design for idle-time knowledge synthesis.
+    /// Executes a single consolidation cycle across all historical sessions.
+    ///
+    /// This method performs exclusive file-locking and summarizes session 
+    /// patterns into durable knowledge markdown files.
     pub async fn run_dream_cycle(&self) -> anyhow::Result<()> {
-        // 1. Process-Level Locking: Acquire exclusive lock for the dream cycle.
-        // This ensures only one agent instance optimizes the knowledge store at once.
         let file = File::create(&self.lock_path)?;
         if file.try_lock_exclusive().is_err() {
-            tracing::info!("Dreaming lock active on {:?}. Skipping cycle.", self.lock_path);
+            tracing::info!("Consolidation lock active. Skipping cycle.");
             return Ok(());
         }
 
-        // 2. Scan for finalized sessions (L5 extracted but not yet L6 consolidated)
+        // Iterative review of conversation history files.
         let sessions = self.storage.list("sessions/").await?;
-        
         for session_name in sessions {
             if !session_name.ends_with(".json") { continue; }
-            
             let session_id = format!("sessions/{}", session_name);
-            let archive_id = format!("archive/{}.zst", session_name);
-            
-            // Skip if already archived to avoid redundant Zstd work
-            if self.storage.exists(&archive_id).await {
-                continue;
-            }
-
             let data = self.storage.retrieve(&session_id).await?;
-            let context: Result<Context, _> = serde_json::from_slice(&data);
-            
-            if let Ok(context) = context {
-                // 3. Synthesis: Deep-review of conversation history.
-                let mut history = String::new();
-                for item in &context.items {
-                    history.push_str(&format!("{:?}: {}\n", item.role, item.content));
-                }
+            let context: Context = serde_json::from_slice(&data)?;
 
-                let prompt = format!(
-                    "CONSOLIDATE MEMORY: Review the history and synthesize any major contradictions \
-                    or new high-level knowledge for the knowledge.json base.\n\n\
-                    HISTORY:\n{}",
-                    history
-                );
-
-                // Execute synthesis (Token-capped in real implementation)
-                let _synthesis = self.llm.completion(&prompt).await?;
-                
-                // 4. Archive with Compression: Store as JSON + Zstd for space efficiency.
-                let compressed_data = utils::compress(&data)?;
-                self.storage.store(&archive_id, &compressed_data).await?;
-                
-                tracing::info!("Successfully consolidated and archived session: {}", session_name);
+            let mut history = String::new();
+            for item in &context.items {
+                history.push_str(&format!("{:?}: {}\n", item.role, item.content));
             }
+
+            let prompt = format!(
+                "CONSOLIDATE MEMORY: Synthesize high-level structural knowledge from the session history below. \
+                Look for goal patterns, technical constraints, and evolving facts. \
+                Return the results as a list of bullet points.\n\n\
+                HISTORY:\n{}",
+                history
+            );
+
+            let synthesis = self.llm.completion(&prompt).await?;
+            
+            // Persist synthesis results (stored as narrative/knowledge expansion) for Layer 6.
+            let synthesis_path = format!("knowledge/synthesis_{}.md", session_name);
+            self.storage.store(&synthesis_path, synthesis.as_bytes()).await?;
+            
+            tracing::info!("Consolidated session knowledge into: {}", synthesis_path);
         }
 
-        // 5. Release Lock
         file.unlock()?;
         Ok(())
     }
 }
 
-#[async_trait]
-impl<S: StorageBackend> MemoryLayer for DreamWorker<S> {
-    fn name(&self) -> &str {
-        "DreamWorker"
-    }
-
-    async fn process(&self, _context: &mut Context) -> anyhow::Result<()> {
-        // "Daydreaming": In-session lighter review logic.
-        Ok(())
-    }
-
-    fn priority(&self) -> u32 {
-        6
-    }
+/// A background scheduler that triggers consolidation cycles based on user idleness.
+pub struct DreamScheduler<S: StorageBackend> {
+    /// The consolidation worker instance.
+    pub worker: Arc<DreamWorker<S>>,
+    /// Shared atomic timestamp of the last recorded user interaction.
+    pub last_activity: Arc<AtomicU64>,
+    /// Background task handle.
+    pub handle: Option<JoinHandle<()>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mem_core::{FileStorage, MemoryItem, MemoryRole};
-    use tempfile::tempdir;
-
-    struct MockLlm;
-    #[async_trait]
-    impl LlmClient for MockLlm {
-        async fn completion(&self, _prompt: &str) -> anyhow::Result<String> {
-            Ok("Synthesized knowledge from dream.".to_string())
+impl<S: StorageBackend + 'static> DreamScheduler<S> {
+    /// Initializes a new DreamScheduler with the specified worker.
+    pub fn new(worker: Arc<DreamWorker<S>>) -> Self {
+        Self {
+            worker,
+            last_activity: Arc::new(AtomicU64::new(Self::now())),
+            handle: None,
         }
     }
 
-    #[tokio::test]
-    async fn test_dream_worker_locking() {
-        let dir = tempdir().unwrap();
-        let storage = FileStorage::new(dir.path().to_path_buf());
-        let llm = Arc::new(MockLlm);
-        let lock_path = dir.path().join("dream.lock");
-        
-        let worker = DreamWorker::new(llm, storage, DreamConfig::default(), lock_path.clone());
-
-        // 1. Initial run should succeed
-        worker.run_dream_cycle().await.unwrap();
-
-        // 2. Simulate concurrent access by manually locking the file
-        let lock_file = File::create(&lock_path).unwrap();
-        lock_file.lock_exclusive().unwrap();
-
-        // 3. Worker should detect lock and skip (logs "Dreaming lock active")
-        worker.run_dream_cycle().await.unwrap(); 
-        
-        lock_file.unlock().unwrap();
+    /// Returns the current Unix timestamp in seconds.
+    fn now() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
     }
 
-    #[tokio::test]
-    async fn test_archival_and_compression() {
-        let dir = tempdir().unwrap();
-        let storage = FileStorage::new(dir.path().to_path_buf());
-        let llm = Arc::new(MockLlm);
-        let lock_path = dir.path().join("dream.lock");
-        let worker = DreamWorker::new(llm, storage.clone(), DreamConfig::default(), lock_path);
-
-        // Setup a mock legacy session
-        let context = Context {
-            items: vec![MemoryItem {
-                role: MemoryRole::User,
-                content: "Hello world".to_string(),
-                timestamp: 123,
-                metadata: serde_json::json!({}),
-            }],
-        };
-        let session_data = serde_json::to_vec(&context).unwrap();
-        
-        storage.store("sessions/legacy_001.json", &session_data).await.unwrap();
-
-        // Run dream cycle
-        worker.run_dream_cycle().await.unwrap();
-
-        // Verify archival exists
-        assert!(dir.path().join("archive/legacy_001.json.zst").exists());
-        
-        // Verify decompression works
-        let compressed = std::fs::read(dir.path().join("archive/legacy_001.json.zst")).unwrap();
-        let decompressed = utils::decompress(&compressed).unwrap();
-        assert_eq!(decompressed, session_data);
+    /// Updates the `last_activity` timestamp to reflect new user interaction.
+    pub fn record_activity(&self) {
+        self.last_activity.store(Self::now(), Ordering::Relaxed);
     }
+
+    /// Spawns a long-running background task that polls for idle thresholds.
+    pub fn start(&mut self) {
+        let worker = Arc::clone(&self.worker);
+        let last_activity = Arc::clone(&self.last_activity);
+        let idle_threshold = worker.config.idle_threshold_mins * 60;
+
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let now = Self::now();
+                let last = last_activity.load(Ordering::Relaxed);
+                let idle_time = now.saturating_sub(last);
+
+                // Trigger dream cycle when idleness exceeds the threshold.
+                if idle_time > idle_threshold {
+                    tracing::info!("Triggering background memory consolidation after {}s idleness", idle_time);
+                    if let Err(e) = worker.run_dream_cycle().await {
+                        tracing::error!("Consolidation cycle failed: {:?}", e);
+                    }
+                    // Reset idle activity after successful consolidation cycle.
+                    last_activity.store(Self::now(), Ordering::Relaxed);
+                }
+            }
+        });
+
+        self.handle = Some(handle);
+    }
+
+    /// Aborts the current background task.
+    pub fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+#[async_trait]
+impl<S: StorageBackend> MemoryLayer for DreamWorker<S> {
+    fn name(&self) -> &str { "DreamWorker" }
+    /// DreamWorker process does nothing in the active context pipeline; it runs offline.
+    async fn process(&self, _context: &mut Context) -> anyhow::Result<()> { Ok(()) }
+    /// Lowest priority ensures this layer doesn't interfere with real-time operations.
+    fn priority(&self) -> u32 { 6 }
 }

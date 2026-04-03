@@ -14,3 +14,12 @@ tokio = { workspace = true, features = ["full", "fs"] }
 async-trait.workspace = true
 zstd.workspace = true
 tokio-retry = "0.3"
+uuid.workspace = true
+prometheus.workspace = true
+ollama-rs.workspace = true
+chrono.workspace = true
+reqwest = { workspace = true, features = ["json", "stream"] }
+futures-util.workspace = true
+async-stream = "0.3"
+tiktoken-rs.workspace = true
+ruvector-graph.workspace = true
