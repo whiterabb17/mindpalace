@@ -456,8 +456,17 @@ impl<S: StorageBackend> StorageBackend for EncryptedStorageBackend<S> {
     pub content_delta: Option<String>, 
     /// Partial tool call delta.
     pub tool_call_delta: Option<ToolCallDelta>, 
+    /// Precise token usage reported by the provider (typically only in the final chunk).
+    pub usage: Option<ResponseUsage>,
     /// Indicates if the stream is finished.
     pub is_final: bool, 
+}
+
+/// Precise token metrics reported by an LLM provider.
+#[derive(Debug, Clone, Serialize, Deserialize)] pub struct ResponseUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }
 
 /// Internal delta for tool call streaming.
@@ -478,7 +487,7 @@ pub trait ModelProvider: Send + Sync {
 pub struct OllamaProvider { pub client: ollama_rs::Ollama, pub model: String, pub embedding_model: String, }
 impl OllamaProvider { pub fn new(model: String, embedding_model: String) -> Self { Self { client: ollama_rs::Ollama::default(), model, embedding_model } } }
 #[async_trait] impl LlmClient for OllamaProvider { async fn completion(&self, prompt: &str) -> anyhow::Result<String> { use ollama_rs::generation::completion::request::GenerationRequest; let res = self.client.generate(GenerationRequest::new(self.model.clone(), prompt.to_string())).await?; Ok(res.response) } }
-#[async_trait] impl ModelProvider for OllamaProvider { async fn complete(&self, req: Request) -> anyhow::Result<Response> { let content = self.completion(&req.prompt).await?; Ok(Response { content, tool_calls: vec![] }) } async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> { use ollama_rs::generation::completion::request::GenerationRequest; let mut stream = self.client.generate_stream(GenerationRequest::new(self.model.clone(), req.prompt)).await?; let stream = async_stream::try_stream! { while let Some(res) = stream.next().await { let res_vec = res.map_err(|e| anyhow::anyhow!(e))?; for res_item in res_vec { yield ResponseChunk { content_delta: Some(res_item.response), tool_call_delta: None, is_final: res_item.done }; if res_item.done { break; } } } }; Ok(Box::pin(stream)) } }
+#[async_trait] impl ModelProvider for OllamaProvider { async fn complete(&self, req: Request) -> anyhow::Result<Response> { let content = self.completion(&req.prompt).await?; Ok(Response { content, tool_calls: vec![] }) } async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> { use ollama_rs::generation::completion::request::GenerationRequest; let mut stream = self.client.generate_stream(GenerationRequest::new(self.model.clone(), req.prompt)).await?; let stream = async_stream::try_stream! { while let Some(res) = stream.next().await { let res_vec = res.map_err(|e| anyhow::anyhow!(e))?; for res_item in res_vec { yield ResponseChunk { content_delta: Some(res_item.response), tool_call_delta: None, usage: None, is_final: res_item.done }; if res_item.done { break; } } } }; Ok(Box::pin(stream)) } }
 
 /// Anthropic API provider.
 pub struct AnthropicProvider { pub api_key: String, pub model: String, }
@@ -528,6 +537,7 @@ struct AnthropicDelta {
 
 #[derive(Deserialize)]
 struct AnthropicUsage {
+    input_tokens: u32,
     output_tokens: u32,
 }
 
@@ -583,10 +593,15 @@ impl ModelProvider for AnthropicProvider {
                         if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                             match event {
                                 AnthropicStreamEvent::ContentBlockDelta { delta } => {
-                                    yield ResponseChunk { content_delta: Some(delta.text), tool_call_delta: None, is_final: false };
+                                    yield ResponseChunk { content_delta: Some(delta.text), tool_call_delta: None, usage: None, is_final: false };
                                 },
-                                AnthropicStreamEvent::MessageDelta { .. } => {
-                                    yield ResponseChunk { content_delta: None, tool_call_delta: None, is_final: true };
+                                AnthropicStreamEvent::MessageDelta { usage } => {
+                                    let response_usage = usage.map(|u| ResponseUsage {
+                                        prompt_tokens: u.input_tokens,
+                                        completion_tokens: u.output_tokens,
+                                        total_tokens: u.input_tokens + u.output_tokens,
+                                    });
+                                    yield ResponseChunk { content_delta: None, tool_call_delta: None, usage: response_usage, is_final: true };
                                 },
                                 _ => {}
                             }
@@ -609,6 +624,12 @@ struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
     stream: bool,
+    stream_options: Option<OpenAiStreamOptions>,
+}
+
+#[derive(Serialize)]
+struct OpenAiStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -635,6 +656,14 @@ struct OpenAiResponseMessage {
 #[derive(Deserialize)]
 struct OpenAiStreamResponse {
     choices: Vec<OpenAiStreamChoice>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -653,7 +682,7 @@ impl LlmClient for OpenAiProvider {
     async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
         let messages = vec![OpenAiMessage { role: "user".into(), content: prompt.into() }];
-        let req = OpenAiRequest { model: self.model.clone(), messages, stream: false };
+        let req = OpenAiRequest { model: self.model.clone(), messages, stream: false, stream_options: None };
         
         let res = client.post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(&self.api_key)
@@ -680,7 +709,12 @@ impl ModelProvider for OpenAiProvider {
     async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         let client = reqwest::Client::new();
         let messages = vec![OpenAiMessage { role: "user".into(), content: req.prompt }];
-        let openai_req = OpenAiRequest { model: self.model.clone(), messages, stream: true };
+        let openai_req = OpenAiRequest { 
+            model: self.model.clone(), 
+            messages, 
+            stream: true, 
+            stream_options: Some(OpenAiStreamOptions { include_usage: true }) 
+        };
 
         let res = client.post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(&self.api_key)
@@ -697,9 +731,18 @@ impl ModelProvider for OpenAiProvider {
                         let data = line.trim_start_matches("data: ");
                         if data == "[DONE]" { break; }
                         if let Ok(event) = serde_json::from_str::<OpenAiStreamResponse>(data) {
+                            let usage = event.usage.map(|u| ResponseUsage {
+                                prompt_tokens: u.prompt_tokens,
+                                completion_tokens: u.completion_tokens,
+                                total_tokens: u.total_tokens,
+                            });
+
                             if let Some(choice) = event.choices.first() {
                                 let is_final = choice.finish_reason.is_some();
-                                yield ResponseChunk { content_delta: choice.delta.content.clone(), tool_call_delta: None, is_final };
+                                yield ResponseChunk { content_delta: choice.delta.content.clone(), tool_call_delta: None, usage, is_final };
+                            } else if usage.is_some() {
+                                // OpenAI usage-only chunk
+                                yield ResponseChunk { content_delta: None, tool_call_delta: None, usage, is_final: true };
                             }
                         }
                     }
@@ -788,13 +831,13 @@ impl ModelProvider for GeminiProvider {
                     for res in event {
                         if let Some(candidate) = res.candidates.first() {
                             if let Some(part) = candidate.content.parts.first() {
-                                yield ResponseChunk { content_delta: Some(part.text.clone()), tool_call_delta: None, is_final: false };
+                                yield ResponseChunk { content_delta: Some(part.text.clone()), tool_call_delta: None, usage: None, is_final: false };
                             }
                         }
                     }
                 }
             }
-            yield ResponseChunk { content_delta: None, tool_call_delta: None, is_final: true };
+            yield ResponseChunk { content_delta: None, tool_call_delta: None, usage: None, is_final: true };
         };
 
         Ok(Box::pin(stream))
