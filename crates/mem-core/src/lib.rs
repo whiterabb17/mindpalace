@@ -21,6 +21,17 @@ pub enum MemoryRole {
     System 
 }
 
+/// Determines the visibility and sharing policy of a piece of knowledge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum FactScope {
+    /// Agent-specific or session-specific facts (default).
+    Private,
+    /// Shared across agents within the same project.
+    Project,
+    /// High-confidence technical or objective facts shared across the ecosystem.
+    Global,
+}
+
 /// A discrete unit of knowledge within the FactGraph, enriched with relationships and metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactNode {
@@ -48,6 +59,8 @@ pub struct FactNode {
     pub tags: Vec<String>,
     /// Semantic vector representation for RAG retrieval.
     pub embedding: Option<Vec<f32>>,
+    /// Visibility scope for multi-agent learning.
+    pub scope: FactScope,
 }
 
 impl FactNode {
@@ -65,7 +78,8 @@ impl FactNode {
             valid_until: None, 
             source_session_id, 
             tags: Vec::new(), 
-            embedding: None 
+            embedding: None,
+            scope: FactScope::Private 
         }
     }
 
@@ -78,6 +92,11 @@ impl FactNode {
         props.insert("timestamp".into(), PropertyValue::from(self.timestamp as i64));
         props.insert("version".into(), PropertyValue::from(self.version as i32));
         props.insert("source_session_id".into(), PropertyValue::from(self.source_session_id.clone()));
+        props.insert("scope".into(), PropertyValue::from(match self.scope {
+            FactScope::Private => "Private",
+            FactScope::Project => "Project",
+            FactScope::Global => "Global",
+        }));
         if let Some(ref emb) = self.embedding {
             props.insert("embedding".into(), PropertyValue::from(emb.clone()));
         }
@@ -117,6 +136,11 @@ impl FactNode {
             source_session_id: get_str("source_session_id"),
             tags: Vec::new(),
             embedding: None,
+            scope: match get_str("scope").as_str() {
+                "Project" => FactScope::Project,
+                "Global" => FactScope::Global,
+                _ => FactScope::Private,
+            },
         }
     }
 }
@@ -209,6 +233,37 @@ impl FactGraph {
         let edge = Edge::new(Uuid::new_v4().to_string(), source_id.to_string(), target_id.to_string(), "DEPENDS_ON".into(), Properties::new());
         self.db.create_edge(edge).map_err(|e| anyhow::anyhow!("{:?}", e))?;
         Ok(())
+    }
+
+    /// Removes facts from the active set if they have passed their expiration date.
+    pub fn garbage_collect_stale_facts(&self) -> anyhow::Result<usize> {
+        let now = chrono::Utc::now().timestamp() as u64;
+        let mut to_remove = Vec::new();
+        
+        {
+            let ids = self.node_ids.read().unwrap();
+            for id in ids.iter() {
+                if let Some(fact) = self.get_fact(id) {
+                    if let Some(expiry) = fact.valid_until {
+                        if now > expiry {
+                            to_remove.push(id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let count = to_remove.len();
+        if count > 0 {
+            let mut ids = self.node_ids.write().unwrap();
+            for id in to_remove {
+                ids.remove(&id);
+                // Note: We don't delete from GraphDB here to preserve history/traces, 
+                // but it's effectively removed from MindPalace's active context.
+            }
+        }
+        
+        Ok(count)
     }
 }
 
@@ -313,6 +368,66 @@ impl StorageBackend for FileStorage {
     }
 }
 
+use aes_gcm::{
+    aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Nonce, Key
+};
+
+/// A decorator that provides transparent authenticated encryption for a StorageBackend.
+///
+/// Uses AES-256-GCM (AEAD) to ensure both confidentiality and integrity of session 
+/// data at rest.
+pub struct EncryptedStorageBackend<S: StorageBackend> {
+    inner: S,
+    cipher: Aes256Gcm,
+}
+
+impl<S: StorageBackend> EncryptedStorageBackend<S> {
+    /// Initializes a new encryption layer with the provided 32-byte key.
+    pub fn new(inner: S, key_bytes: [u8; 32]) -> Self {
+        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+        let cipher = Aes256Gcm::new(key);
+        Self { inner, cipher }
+    }
+}
+
+#[async_trait]
+impl<S: StorageBackend> StorageBackend for EncryptedStorageBackend<S> {
+    async fn store(&self, id: &str, data: &[u8]) -> anyhow::Result<()> {
+        use rand::RngCore;
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // Encrypt the data.
+        let ciphertext = self.cipher.encrypt(nonce, data)
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {:?}", e))?;
+        
+        // Prepend nonce to the stored payload.
+        let mut payload = nonce_bytes.to_vec();
+        payload.extend(ciphertext);
+        
+        self.inner.store(id, &payload).await
+    }
+
+    async fn retrieve(&self, id: &str) -> anyhow::Result<Vec<u8>> {
+        let payload = self.inner.retrieve(id).await?;
+        if payload.len() < 12 { return Err(anyhow::anyhow!("Payload too short for decryption (missing nonce)")); }
+        
+        let (nonce_bytes, ciphertext) = payload.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        
+        let plaintext = self.cipher.decrypt(nonce, ciphertext)
+            .map_err(|e| anyhow::anyhow!("Decryption failed: {:?}", e))?;
+            
+        Ok(plaintext)
+    }
+
+    async fn exists(&self, id: &str) -> bool { self.inner.exists(id).await }
+
+    async fn list(&self, prefix: &str) -> anyhow::Result<Vec<String>> { self.inner.list(prefix).await }
+}
+
 /// High-level client for executing model completions.
 #[async_trait] pub trait LlmClient: Send + Sync { 
     /// Executes a text completion for the given prompt.
@@ -368,24 +483,327 @@ impl OllamaProvider { pub fn new(model: String, embedding_model: String) -> Self
 /// Anthropic API provider.
 pub struct AnthropicProvider { pub api_key: String, pub model: String, }
 impl AnthropicProvider { pub fn new(api_key: String, model: String) -> Self { Self { api_key, model } } }
-#[async_trait] impl LlmClient for AnthropicProvider { async fn completion(&self, _prompt: &str) -> anyhow::Result<String> { Ok("Anthropic completion stub".to_string()) } }
-#[async_trait] impl ModelProvider for AnthropicProvider { async fn complete(&self, _req: Request) -> anyhow::Result<Response> { Ok(Response { content: "Anthropic response".into(), tool_calls: vec![] }) } async fn stream_complete(&self, _req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> { let stream = async_stream::try_stream! { yield ResponseChunk { content_delta: Some("Anthropic ".into()), tool_call_delta: None, is_final: false }; yield ResponseChunk { content_delta: Some("stream stub".into()), tool_call_delta: None, is_final: true }; }; Ok(Box::pin(stream)) } }
+
+#[derive(Serialize)]
+struct AnthropicRequest {
+    model: String,
+    max_tokens: u32,
+    messages: Vec<AnthropicMessage>,
+    stream: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AnthropicMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct AnthropicResponse {
+    content: Vec<AnthropicContent>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicContent {
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicStreamEvent {
+    #[serde(rename = "message_start")]
+    MessageStart {},
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta { delta: AnthropicDelta },
+    #[serde(rename = "message_delta")]
+    MessageDelta { usage: Option<AnthropicUsage> },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct AnthropicDelta {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct AnthropicUsage {
+    output_tokens: u32,
+}
+
+#[async_trait]
+impl LlmClient for AnthropicProvider {
+    async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
+        let client = reqwest::Client::new();
+        let messages = vec![AnthropicMessage { role: "user".into(), content: prompt.into() }];
+        let req = AnthropicRequest { model: self.model.clone(), max_tokens: 4096, messages, stream: false };
+        
+        let res = client.post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&req)
+            .send().await?;
+        
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("Anthropic API error: {}", err);
+        }
+        
+        let data: AnthropicResponse = res.json().await?;
+        Ok(data.content.first().map(|c| c.text.clone()).unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl ModelProvider for AnthropicProvider {
+    async fn complete(&self, req: Request) -> anyhow::Result<Response> {
+        let content = self.completion(&req.prompt).await?;
+        Ok(Response { content, tool_calls: vec![] })
+    }
+
+    async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
+        let client = reqwest::Client::new();
+        let messages = vec![AnthropicMessage { role: "user".into(), content: req.prompt }];
+        let anthropic_req = AnthropicRequest { model: self.model.clone(), max_tokens: 4096, messages, stream: true };
+
+        let res = client.post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&anthropic_req)
+            .send().await?;
+
+        let stream = async_stream::try_stream! {
+            let mut byte_stream = res.bytes_stream();
+            while let Some(chunk) = byte_stream.next().await {
+                let bytes = chunk?;
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    if line.starts_with("data: ") {
+                        let data = line.trim_start_matches("data: ");
+                        if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                            match event {
+                                AnthropicStreamEvent::ContentBlockDelta { delta } => {
+                                    yield ResponseChunk { content_delta: Some(delta.text), tool_call_delta: None, is_final: false };
+                                },
+                                AnthropicStreamEvent::MessageDelta { .. } => {
+                                    yield ResponseChunk { content_delta: None, tool_call_delta: None, is_final: true };
+                                },
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+}
 
 /// OpenAI API provider.
 pub struct OpenAiProvider { pub api_key: String, pub model: String, }
 impl OpenAiProvider { pub fn new(api_key: String, model: String) -> Self { Self { api_key, model } } }
-#[async_trait] impl LlmClient for OpenAiProvider { async fn completion(&self, _prompt: &str) -> anyhow::Result<String> { Ok("OpenAI completion stub".to_string()) } }
-#[async_trait] impl ModelProvider for OpenAiProvider { async fn complete(&self, _req: Request) -> anyhow::Result<Response> { Ok(Response { content: "OpenAI response".into(), tool_calls: vec![] }) } async fn stream_complete(&self, _req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> { let stream = async_stream::try_stream! { yield ResponseChunk { content_delta: Some("OpenAI ".into()), tool_call_delta: None, is_final: false }; yield ResponseChunk { content_delta: Some("stream stub".into()), tool_call_delta: None, is_final: true }; }; Ok(Box::pin(stream)) } }
+
+#[derive(Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    stream: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OpenAiMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct OpenAiResponse {
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct OpenAiResponseMessage {
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamResponse {
+    choices: Vec<OpenAiStreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiDelta {
+    content: Option<String>,
+}
+
+#[async_trait]
+impl LlmClient for OpenAiProvider {
+    async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
+        let client = reqwest::Client::new();
+        let messages = vec![OpenAiMessage { role: "user".into(), content: prompt.into() }];
+        let req = OpenAiRequest { model: self.model.clone(), messages, stream: false };
+        
+        let res = client.post("https://api.openai.com/v1/chat/completions")
+            .bearer_auth(&self.api_key)
+            .json(&req)
+            .send().await?;
+            
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("OpenAI API error: {}", err);
+        }
+            
+        let data: OpenAiResponse = res.json().await?;
+        Ok(data.choices.first().map(|c| c.message.content.clone()).unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl ModelProvider for OpenAiProvider {
+    async fn complete(&self, req: Request) -> anyhow::Result<Response> {
+        let content = self.completion(&req.prompt).await?;
+        Ok(Response { content, tool_calls: vec![] })
+    }
+
+    async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
+        let client = reqwest::Client::new();
+        let messages = vec![OpenAiMessage { role: "user".into(), content: req.prompt }];
+        let openai_req = OpenAiRequest { model: self.model.clone(), messages, stream: true };
+
+        let res = client.post("https://api.openai.com/v1/chat/completions")
+            .bearer_auth(&self.api_key)
+            .json(&openai_req)
+            .send().await?;
+
+        let stream = async_stream::try_stream! {
+            let mut byte_stream = res.bytes_stream();
+            while let Some(chunk) = byte_stream.next().await {
+                let bytes = chunk?;
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    if line.starts_with("data: ") {
+                        let data = line.trim_start_matches("data: ");
+                        if data == "[DONE]" { break; }
+                        if let Ok(event) = serde_json::from_str::<OpenAiStreamResponse>(data) {
+                            if let Some(choice) = event.choices.first() {
+                                let is_final = choice.finish_reason.is_some();
+                                yield ResponseChunk { content_delta: choice.delta.content.clone(), tool_call_delta: None, is_final };
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+}
 
 /// Google Gemini API provider.
 pub struct GeminiProvider { pub api_key: String, pub model: String, }
 impl GeminiProvider { pub fn new(api_key: String, model: String) -> Self { Self { api_key, model } } }
-#[async_trait] impl LlmClient for GeminiProvider { async fn completion(&self, _prompt: &str) -> anyhow::Result<String> { Ok("Gemini completion stub".to_string()) } }
-#[async_trait] impl ModelProvider for GeminiProvider { async fn complete(&self, _req: Request) -> anyhow::Result<Response> { Ok(Response { content: "Gemini response".into(), tool_calls: vec![] }) } async fn stream_complete(&self, _req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> { let stream = async_stream::try_stream! { yield ResponseChunk { content_delta: Some("Gemini ".into()), tool_call_delta: None, is_final: false }; yield ResponseChunk { content_delta: Some("stream stub".into()), tool_call_delta: None, is_final: true }; }; Ok(Box::pin(stream)) } }
 
-impl TokenCounter for GeminiProvider { fn count_tokens(&self, text: &str) -> usize { tiktoken_rs::cl100k_base().unwrap().encode_with_special_tokens(text).len() } }
+#[derive(Serialize)]
+struct GeminiRequest {
+    contents: Vec<GeminiContent>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GeminiContent {
+    role: String,
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GeminiPart {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct GeminiResponse {
+    candidates: Vec<GeminiCandidate>,
+}
+
+#[derive(Deserialize)]
+struct GeminiCandidate {
+    content: GeminiContent,
+}
+
+#[async_trait]
+impl LlmClient for GeminiProvider {
+    async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
+        let client = reqwest::Client::new();
+        let contents = vec![GeminiContent { role: "user".into(), parts: vec![GeminiPart { text: prompt.into() }] }];
+        let req = GeminiRequest { contents };
+        
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", self.model, self.api_key);
+        let res = client.post(&url)
+            .json(&req)
+            .send().await?;
+
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("Gemini API error: {}", err);
+        }
+
+        let data: GeminiResponse = res.json().await?;
+        Ok(data.candidates.first().and_then(|c| c.content.parts.first()).map(|p| p.text.clone()).unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl ModelProvider for GeminiProvider {
+    async fn complete(&self, req: Request) -> anyhow::Result<Response> {
+        let content = self.completion(&req.prompt).await?;
+        Ok(Response { content, tool_calls: vec![] })
+    }
+
+    async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
+        let client = reqwest::Client::new();
+        let contents = vec![GeminiContent { role: "user".into(), parts: vec![GeminiPart { text: req.prompt }] }];
+        let gemini_req = GeminiRequest { contents };
+        
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}", self.model, self.api_key);
+        let res = client.post(&url)
+            .json(&gemini_req)
+            .send().await?;
+
+        let stream = async_stream::try_stream! {
+            let mut byte_stream = res.bytes_stream();
+            while let Some(chunk) = byte_stream.next().await {
+                let bytes = chunk?;
+                if let Ok(event) = serde_json::from_slice::<Vec<GeminiResponse>>(&bytes) {
+                    for res in event {
+                        if let Some(candidate) = res.candidates.first() {
+                            if let Some(part) = candidate.content.parts.first() {
+                                yield ResponseChunk { content_delta: Some(part.text.clone()), tool_call_delta: None, is_final: false };
+                            }
+                        }
+                    }
+                }
+            }
+            yield ResponseChunk { content_delta: None, tool_call_delta: None, is_final: true };
+        };
+
+        Ok(Box::pin(stream))
+    }
+}
+
+impl TokenCounter for GeminiProvider { fn count_tokens(&self, text: &str) -> usize { (text.len() / 4).max(1) } }
 impl TokenCounter for OllamaProvider { fn count_tokens(&self, text: &str) -> usize { tiktoken_rs::cl100k_base().unwrap().encode_with_special_tokens(text).len() } }
-impl TokenCounter for AnthropicProvider { fn count_tokens(&self, text: &str) -> usize { tiktoken_rs::cl100k_base().unwrap().encode_with_special_tokens(text).len() } }
+impl TokenCounter for AnthropicProvider { fn count_tokens(&self, text: &str) -> usize { (text.len() / 3).max(1) } }
 impl TokenCounter for OpenAiProvider { fn count_tokens(&self, text: &str) -> usize { let bpe = tiktoken_rs::get_bpe_from_model(&self.model).unwrap_or_else(|_| tiktoken_rs::cl100k_base().unwrap()); bpe.encode_with_special_tokens(text).len() } }
 
 /// Scoring interface for determining how relevant a memory item is to the current conversation.
@@ -418,6 +836,9 @@ pub trait ImportanceAnalyzer: Send + Sync {
     pub total_tokens_processed: Gauge, 
 }
 impl MemoryMetrics { pub fn new(registry: &Registry) -> anyhow::Result<Self> { let context_size_bytes = register_gauge_with_registry!(opts!("mindpalace_context_size_bytes", "desc"), registry)?; let item_count = register_gauge_with_registry!(opts!("mindpalace_item_count", "desc"), registry)?; let compression_ratio = register_gauge_with_registry!(opts!("mindpalace_compression_ratio", "desc"), registry)?; let layer_latency = register_histogram_with_registry!("mindpalace_layer_latency_seconds", "desc", vec![0.1], registry)?; let fact_count = register_gauge_with_registry!(opts!("mindpalace_fact_count", "desc"), registry)?; let total_tokens_processed = register_gauge_with_registry!(opts!("mindpalace_total_tokens_processed", "desc"), registry)?; Ok(Self { context_size_bytes, item_count, compression_ratio, layer_latency, fact_count, total_tokens_processed }) } }
+
+pub mod config;
+pub use config::MindPalaceConfig;
 
 pub mod analysis;
 

@@ -1,4 +1,4 @@
-use mem_core::{MemoryLayer, Context, LlmClient, StorageBackend};
+use mem_core::{MemoryLayer, Context, LlmClient, StorageBackend, MindPalaceConfig};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -6,29 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fs4::FileExt;
 use std::fs::File;
 use std::path::PathBuf;
-use serde::{Serialize, Deserialize};
 use tokio::task::JoinHandle;
-
-/// Configuration for background memory consolidation cycles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DreamConfig {
-    /// Maximum number of tokens to process in a single dream cycle.
-    pub max_tokens_per_dream: usize,
-    /// Minimum idle time (minutes) before a dream cycle is triggered.
-    pub idle_threshold_mins: u64,
-    /// Number of sessions to retain during background maintenance.
-    pub retention_sessions: usize,
-}
-
-impl Default for DreamConfig {
-    fn default() -> Self {
-        Self {
-            max_tokens_per_dream: 50_000,
-            idle_threshold_mins: 45,
-            retention_sessions: 10,
-        }
-    }
-}
 
 /// A background worker for deep-review and consolidation of session history.
 ///
@@ -40,15 +18,15 @@ pub struct DreamWorker<S: StorageBackend> {
     pub llm: Arc<dyn LlmClient>,
     /// Backend for retrieving historical sessions and storing synthesis results.
     pub storage: S,
-    /// Worker configuration (idle thresholds, retention, caps).
-    pub config: DreamConfig,
+    /// System-wide configuration for thresholds and limits.
+    pub config: MindPalaceConfig,
     /// Path to a global lock file to prevent concurrent consolidation attempts.
     pub lock_path: PathBuf,
 }
 
 impl<S: StorageBackend> DreamWorker<S> {
     /// Initializes a new DreamWorker with the specified backend and configuration.
-    pub fn new(llm: Arc<dyn LlmClient>, storage: S, config: DreamConfig, lock_path: PathBuf) -> Self {
+    pub fn new(llm: Arc<dyn LlmClient>, storage: S, config: MindPalaceConfig, lock_path: PathBuf) -> Self {
         Self { llm, storage, config, lock_path }
     }
 

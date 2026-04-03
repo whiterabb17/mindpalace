@@ -12,6 +12,8 @@ anyhow.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["full", "fs"] }
 async-trait.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
 zstd.workspace = true
 tokio-retry = "0.3"
 uuid.workspace = true

@@ -1,4 +1,4 @@
-use mem_core::{MemoryLayer, Context, LlmClient, FactNode, KnowledgeBase, StorageBackend, EmbeddingProvider, utils};
+use mem_core::{MemoryLayer, Context, LlmClient, FactNode, KnowledgeBase, StorageBackend, EmbeddingProvider, utils, MindPalaceConfig};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::collections::HashSet;
@@ -15,6 +15,8 @@ pub struct FactExtractor<S: StorageBackend> {
     pub embeddings: Arc<dyn EmbeddingProvider>,
     /// Backend for persistent storage of the consolidated KnowledgeBase.
     pub storage: S,
+    /// System-wide configuration for thresholds and limits.
+    pub config: MindPalaceConfig,
     /// Identifier for the persistent knowledge file.
     pub knowledge_path: String,
     /// Identifier for the current source conversation session.
@@ -23,8 +25,8 @@ pub struct FactExtractor<S: StorageBackend> {
 
 impl<S: StorageBackend> FactExtractor<S> {
     /// Initializes a new FactExtractor for the specified session.
-    pub fn new(llm: Arc<dyn LlmClient>, embeddings: Arc<dyn EmbeddingProvider>, storage: S, knowledge_path: String, session_id: String) -> Self {
-        Self { llm, embeddings, storage, knowledge_path, session_id }
+    pub fn new(llm: Arc<dyn LlmClient>, embeddings: Arc<dyn EmbeddingProvider>, storage: S, config: MindPalaceConfig, knowledge_path: String, session_id: String) -> Self {
+        Self { llm, embeddings, storage, config, knowledge_path, session_id }
     }
 
     /// Identifies and extracts a set of durable JSON-formatted facts from the current context.
@@ -42,6 +44,7 @@ Fields:
 - confidence: 0.0 to 1.0
 - tags: Array of strings
 - dependencies: Array of content strings this fact relies on
+- scope: 'Private' (default), 'Project' (shared in project), or 'Global' (shared ecosystem)
 
 HISTORY:
 {}", history);
@@ -53,6 +56,11 @@ HISTORY:
                 let mut node = FactNode::new(cont.to_string(), cat.to_string(), conf as f32, self.session_id.clone());
                 node.tags = v["tags"].as_array().map_or(Vec::new(), |t| t.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect());
                 node.dependencies = v["dependencies"].as_array().map_or(Vec::new(), |t| t.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect());
+                node.scope = match v["scope"].as_str() {
+                    Some("Project") => mem_core::FactScope::Project,
+                    Some("Global") => mem_core::FactScope::Global,
+                    _ => mem_core::FactScope::Private,
+                };
                 Some(node)
             } else { None }
         }).collect())
@@ -60,12 +68,14 @@ HISTORY:
 
     /// Determines if a fact is redundant by checking its semantic distance to existing facts.
     ///
-    /// A similarity score > 0.85 is considered a duplicate.
+    /// The similarity threshold is determined by the system configuration.
     pub async fn semantic_deduplication(&self, new_fact: &FactNode, existing_facts: &[FactNode]) -> anyhow::Result<bool> {
         let new_embedding = self.embeddings.embed(&new_fact.content).await?;
         for existing in existing_facts {
             let existing_embedding = self.embeddings.embed(&existing.content).await?;
-            if utils::cosine_similarity(&new_embedding, &existing_embedding) > 0.85 { return Ok(true); }
+            if utils::cosine_similarity(&new_embedding, &existing_embedding) > self.config.similarity_threshold { 
+                return Ok(true); 
+            }
         }
         Ok(false)
     }
@@ -89,6 +99,10 @@ HISTORY:
         let resolver = ConflictResolver { llm: Arc::clone(&self.llm) };
         resolver.detect_and_resolve_conflicts(&mut kb).await?;
         
+        // Persist the updated knowledge base.
+        let data = serde_json::to_vec_pretty(&kb)?;
+        self.storage.store(&self.knowledge_path, &data).await?;
+
         Ok(())
     }
 }

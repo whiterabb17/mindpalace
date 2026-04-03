@@ -1,4 +1,4 @@
-use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole, StorageBackend};
+use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole, StorageBackend, MindPalaceConfig};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -12,10 +12,8 @@ pub struct SessionSummarizer<S: StorageBackend> {
     pub llm: Arc<dyn LlmClient>,
     /// Backend for persisting summary markdown files.
     pub storage: S,
-    /// Number of memory items to wait for before triggering a summarization cycle.
-    pub interval: usize,
-    /// Percentage of older items to remove and replace with the summary (e.g., 0.6).
-    pub compression_ratio: f32,
+    /// System-wide configuration for thresholds and limits.
+    pub config: MindPalaceConfig,
     /// If true, validates that the summary retains all critical facts before replacement.
     pub validation_mode: bool,
     /// Directory for storing narrative markdown files.
@@ -27,16 +25,14 @@ impl<S: StorageBackend> SessionSummarizer<S> {
     pub fn new(
         llm: Arc<dyn LlmClient>,
         storage: S,
-        interval: usize,
-        compression_ratio: f32,
+        config: MindPalaceConfig,
         narrative_dir: String,
         validation_mode: bool,
     ) -> Self {
         Self {
             llm,
             storage,
-            interval,
-            compression_ratio,
+            config,
             narrative_dir,
             validation_mode,
         }
@@ -77,7 +73,7 @@ impl<S: StorageBackend> MemoryLayer for SessionSummarizer<S> {
 
     /// Executes the summarization pipeline, including fidelity checks and markdown persistence.
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
-        if context.items.len() < self.interval {
+        if context.items.len() < self.config.summary_interval {
             return Ok(());
         }
 
@@ -99,7 +95,7 @@ impl<S: StorageBackend> MemoryLayer for SessionSummarizer<S> {
 
         // 4. Comprehensive contextual pruning (Gap 3).
         // Calculation ensures that latest messages are retained while the history is condensed.
-        let cutoff_idx = (context.items.len() as f32 * self.compression_ratio) as usize;
+        let cutoff_idx = (context.items.len() as f32 * self.config.compression_ratio) as usize;
         let original_count = context.items.len();
         
         let summary_item = MemoryItem {

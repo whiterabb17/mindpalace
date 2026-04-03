@@ -1,4 +1,4 @@
-use mem_core::{MemoryLayer, Context, MemoryRole, RelevanceAnalyzer};
+use mem_core::{MemoryLayer, Context, MemoryRole, RelevanceAnalyzer, MindPalaceConfig};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -18,8 +18,8 @@ pub enum TTLDecayStrategy {
 /// provide "stickiness" to important recent messages, extending their TTL 
 /// even if they exceed the base age threshold.
 pub struct AdaptiveMicroCompactor {
-    /// The base TTL in seconds.
-    pub base_ttl: u64,
+    /// System-wide configuration for thresholds and limits.
+    pub config: MindPalaceConfig,
     /// Strategy to apply when calculating the effective TTL.
     pub decay_function: TTLDecayStrategy,
     /// Analyzer for determining a message's importance to the current task.
@@ -27,10 +27,10 @@ pub struct AdaptiveMicroCompactor {
 }
 
 impl AdaptiveMicroCompactor {
-    /// Initializes a new AdaptiveMicroCompactor with the specified base TTL and decay strategy.
-    pub fn new(base_ttl: u64, decay_function: TTLDecayStrategy, relevance_analyzer: Arc<dyn RelevanceAnalyzer>) -> Self {
+    /// Initializes a new AdaptiveMicroCompactor with the specified configuration and decay strategy.
+    pub fn new(config: MindPalaceConfig, decay_function: TTLDecayStrategy, relevance_analyzer: Arc<dyn RelevanceAnalyzer>) -> Self {
         Self {
-            base_ttl,
+            config,
             decay_function,
             relevance_analyzer,
         }
@@ -64,15 +64,15 @@ impl MemoryLayer for AdaptiveMicroCompactor {
             let effective_ttl = match &self.decay_function {
                 TTLDecayStrategy::AdaptiveByType => {
                     // Relevance boost: Keep high-relevance items up to 3x longer.
-                    (self.base_ttl as f32 * (1.0 + relevance * 2.0)) as u64
+                    (self.config.base_ttl_seconds as f32 * (1.0 + relevance * 2.0)) as u64
                 }
                 TTLDecayStrategy::Exponential { half_life } => {
                     let decay = 2_f32.powf(-(age as f32) / (*half_life as f32));
-                    (self.base_ttl as f32 * decay * (1.0 + relevance)) as u64
+                    (self.config.base_ttl_seconds as f32 * decay * (1.0 + relevance)) as u64
                 }
                 TTLDecayStrategy::Linear { slope } => {
                     let decay = (1.0 - (age as f32 * slope)).max(0.0);
-                    (self.base_ttl as f32 * decay * (1.0 + relevance)) as u64
+                    (self.config.base_ttl_seconds as f32 * decay * (1.0 + relevance)) as u64
                 }
             };
             

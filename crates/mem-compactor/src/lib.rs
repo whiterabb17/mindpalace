@@ -1,4 +1,4 @@
-use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole, ImportanceAnalyzer, StorageBackend};
+use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole, ImportanceAnalyzer, StorageBackend, MindPalaceConfig};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -14,8 +14,8 @@ pub struct IntelligentFullCompactor<S: StorageBackend> {
     pub importance_analyzer: Arc<dyn ImportanceAnalyzer>,
     /// Backend for persisting pre-compaction checkpoints.
     pub storage: S,
-    /// Maximum number of items the context is allowed to reach.
-    pub max_items: usize,
+    /// System-wide configuration for thresholds and limits.
+    pub config: MindPalaceConfig,
     /// Directory for storing safety checkpoints.
     pub checkpoint_dir: String,
 }
@@ -26,14 +26,14 @@ impl<S: StorageBackend> IntelligentFullCompactor<S> {
         llm: Arc<dyn LlmClient>,
         importance_analyzer: Arc<dyn ImportanceAnalyzer>,
         storage: S,
-        max_items: usize,
+        config: MindPalaceConfig,
         checkpoint_dir: String,
     ) -> Self {
         Self {
             llm,
             importance_analyzer,
             storage,
-            max_items,
+            config,
             checkpoint_dir,
         }
     }
@@ -75,7 +75,7 @@ impl<S: StorageBackend> MemoryLayer for IntelligentFullCompactor<S> {
 
     /// Executes the full compaction cycle, including checkpointing and importance-based pruning.
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
-        if context.items.len() < self.max_items {
+        if context.items.len() < self.config.max_context_items {
             return Ok(());
         }
 

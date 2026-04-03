@@ -13,6 +13,8 @@ members = [
     "crates/brain",
     "crates/mem-retriever",
     "crates/mem-resilience",
+    "crates/mem-broker",
+    "crates/mem-personality",
 ]
 
 [workspace.package]
@@ -45,3 +47,6 @@ async-stream = "0.3"
 ruvector-core = "0.1"
 ruvector-graph = "0.1"
 tiktoken-rs = "0.9"
+tracing-subscriber = "0.3"
+aes-gcm = "0.10"
+rand = "0.8"

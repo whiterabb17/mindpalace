@@ -1,4 +1,4 @@
-use mem_core::{MemoryLayer, Context, MemoryMetrics, TokenCounter};
+use mem_core::{MemoryLayer, Context, MemoryMetrics, TokenCounter, MindPalaceConfig, MemoryRole};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,15 +13,18 @@ pub struct Brain {
     pub metrics: Option<MemoryMetrics>,
     /// Optional counter for precise token calculation across model providers.
     pub token_counter: Option<Arc<dyn TokenCounter>>,
+    /// System-wide configuration for thresholds and limits.
+    pub config: MindPalaceConfig,
 }
 
 impl Brain {
-    /// Initializes a new Brain instance with optional metrics and token counting.
-    pub fn new(metrics: Option<MemoryMetrics>, token_counter: Option<Arc<dyn TokenCounter>>) -> Self {
+    /// Initializes a new Brain instance with the specified configuration.
+    pub fn new(config: MindPalaceConfig, metrics: Option<MemoryMetrics>, token_counter: Option<Arc<dyn TokenCounter>>) -> Self {
         Self { 
             layers: Vec::new(),
             metrics,
             token_counter,
+            config,
         }
     }
 
@@ -89,10 +92,32 @@ impl Brain {
             }
         }
 
+        // 5. Final Budget Enforcement (Hard Limit Protection).
+        // Ensure that context never exceeds max_context_items, even if layers fail to compress.
+        if context.items.len() > self.config.max_context_items {
+            tracing::warn!(
+                "Context budget exceeded: {} > {}. Performing emergency pruning.",
+                context.items.len(),
+                self.config.max_context_items
+            );
+            
+            // Keep the system prompt + most recent messages.
+            let mut final_items = Vec::new();
+            if let Some(system_msg) = context.items.iter().find(|i| i.role == MemoryRole::System).cloned() {
+                final_items.push(system_msg);
+            }
+            
+            let retain_count = self.config.max_context_items.saturating_sub(final_items.len());
+            let start_idx = context.items.len().saturating_sub(retain_count);
+            final_items.extend(context.items.drain(start_idx..));
+            
+            context.items = final_items;
+        }
+
         tracing::info!(
             "Memory optimized: {} items -> {} items ({}% compression)",
             initial_items,
-            final_items,
+            context.items.len(),
             if initial_size > 0 { (final_size as f32 / initial_size as f32) * 100.0 } else { 100.0 }
         );
 
@@ -101,8 +126,8 @@ impl Brain {
 }
 
 impl Default for Brain {
-    /// Creates a default Brain without metrics or token counting.
+    /// Creates a default Brain with standard configuration.
     fn default() -> Self {
-        Self::new(None, None)
+        Self::new(MindPalaceConfig::default(), None, None)
     }
 }
