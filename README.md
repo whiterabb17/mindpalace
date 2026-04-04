@@ -82,4 +82,4 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-*This ecosystem is optimized for use with the [Mentalist](file:///d:/Repos/MindPalace/mentalist/README.md) middleware harness.*
+*This ecosystem is optimized for use with the [Mentalist](https://github.com/whiterabb17/mentalist/README.md) middleware harness.*

@@ -439,7 +439,7 @@ impl<S: StorageBackend> StorageBackend for EncryptedStorageBackend<S> {
     /// Input prompt.
     pub prompt: String, 
     /// Current conversation context.
-    pub context: Context, 
+    pub context: Arc<Context>, 
 }
 
 /// Standardized response for model providers.
@@ -495,7 +495,7 @@ impl ModelProvider for OllamaProvider {
     }
     async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         use ollama_rs::generation::completion::request::GenerationRequest;
-        let mut stream = self.client.generate_stream(GenerationRequest::new(self.model.clone(), req.prompt)).await?;
+        let mut stream = self.client.generate_stream(GenerationRequest::new(self.model.clone(), req.prompt.clone())).await?;
         let stream = async_stream::try_stream! {
             while let Some(res) = stream.next().await {
                 let res_vec = res.map_err(|e| anyhow::anyhow!(e))?;
@@ -605,7 +605,7 @@ impl ModelProvider for AnthropicProvider {
 
     async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         let client = reqwest::Client::new();
-        let messages = vec![AnthropicMessage { role: "user".into(), content: req.prompt }];
+        let messages = vec![AnthropicMessage { role: "user".into(), content: req.prompt.clone() }];
         let anthropic_req = AnthropicRequest { model: self.model.clone(), max_tokens: 4096, messages, stream: true };
 
         let res = client.post("https://api.anthropic.com/v1/messages")
@@ -749,7 +749,7 @@ impl ModelProvider for OpenAiProvider {
 
     async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         let client = reqwest::Client::new();
-        let messages = vec![OpenAiMessage { role: "user".into(), content: req.prompt }];
+        let messages = vec![OpenAiMessage { role: "user".into(), content: req.prompt.clone() }];
         let openai_req = OpenAiRequest { 
             model: self.model.clone(), 
             messages, 

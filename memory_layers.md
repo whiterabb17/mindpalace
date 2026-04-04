@@ -1,52 +1,58 @@
-# 7-Layer Agent Memory Architecture
+# 7-Layer Agent Memory Architecture (Production Hardened)
 
-This document provides a comprehensive analysis of the 7-layer memory system used for sophisticated AI agents (inspired by the architecture of Claude Code). The primary goals of this architecture are **context efficiency**, **cost reduction**, and **long-term knowledge retention**.
-
----
-
-## Architecture Overview
-
-The system operates on a "Defense in Depth" model for context. Each layer acts as a filter or buffer to prevent the context window from becoming overloaded with redundant or low-value information.
-
-### Layer 1: Tool Result Storage (Offloading)
-- **Goal**: Minimize context bloat from verbose tool outputs (e.g., long file reads, network responses).
-- **Mechanism**: Tool outputs larger than a threshold (e.g., 2KB) are persisted to local disk. Only a "preview" or "stub" is included in the immediate context.
-- **Trigger**: Any tool execution returning more than $N$ characters.
-
-### Layer 2: Microcompaction (Cache Preservation)
-- **Goal**: Maintain high "Prompt Cache" hit rates by keeping prefixes byte-identical.
-- **Mechanism**: Silently removes old tool results based on their Time-to-Live (TTL) or specific tags. It uses APIs like `cache_edits` to selectively "evict" content from the middle of the transcript without breaking the prefix.
-- **Trigger**: Context usage approaching a specific threshold (e.g., 20k tokens).
-
-### Layer 3: Session Memory (Continuous Markdown)
-- **Goal**: Provide a cheap, iterative summary of the current session.
-- **Mechanism**: A separate, lightweight "summarizer" agent runs concurrently (or at intervals) to maintain a single markdown file mapping the progress of the task.
-- **Trigger**: Regular intervals during a long-running session.
-
-### Layer 4: Full Compaction (Deep Summarization)
-- **Goal**: Fallback when previous layers fail to keep context under limits.
-- **Mechanism**: A heavyweight summarizer agent analyzes the *entire* context and produces a structured 9-section report (covering Goal, Context, Constraints, Progress, etc.). This report replaces the bulk of the recent history.
-- **Trigger**: Approaching the hard context limit (~180k-200k tokens).
-
-### Layer 5: Auto Memory Extraction (Durable Knowledge)
-- **Goal**: Capture reusable "Facts" that persist across different sessions.
-- **Mechanism**: After a session ends or a major milestone is reached, the system extracts "User Intent," "Project Settings," and "Hardcoded Knowledge" into persistent knowledge files (e.g., `.agent/knowledge.json`).
-- **Trigger**: Session termination or manual "checkpoint" command.
-
-### Layer 6: Dreaming (Background Consolidation)
-- **Goal**: Higher-order reasoning and cleanup during idle time.
-- **Mechanism**: A background process (protected by a PID-level mutex lock) reads recent transcripts and knowledge files to consolidate them, resolve contradictions, and optimize stored prompts.
-- **Trigger**: System idle time (no user interaction for $X$ minutes).
-
-### Layer 7: Cross-Agent Comms (Coordination)
-- **Goal**: Efficient memory sharing between parent and child agents.
-- **Mechanism**: Child agents inherit a "frozen" snapshot of the parent's memory. They use specialized messaging protocols to report back to the parent without duplicating the entire context.
-- **Trigger**: Spawning sub-tasks or parallel lookups.
+This document provides a comprehensive technical specification of the 7-layer memory system implemented in the Mentalist agent system. The architecture is designed for **context efficiency**, **zero-copy performance**, and **resilient knowledge retention**.
 
 ---
 
-## Design Principles
+## Layer 0: Shared Context Architecture (`Arc<Context>`)
+Before any filtering occurs, the system utilizes an **Atomic Reference Counted** (`Arc`) shared memory model.
+- **Goal**: Eliminate expensive cloning of large conversation transcripts across the pipeline.
+- **Mechanism**: The `mentalist::Request` struct wraps the `Context` in an `Arc`. Middleware layers clone only the pointer unless a mutation is required, in which case a "copy-on-write" (`*self.state.context).clone()`) pattern is used.
 
-1. **Byte-Identical Prefixes**: Always prioritize keeping the start of the prompt exactly the same to ensure Prompt Caching works (crucial for cost).
-2. **Cheapest First**: Favor Disk Storage (Layer 1) and Microcompaction (Layer 2) over LLM-driven Summarization (Layers 3 & 4).
-3. **Intentional Extraction**: Memory isn't just "everything that happened"; it's the *distilled essence* of what matters for future tasks.
+---
+
+## The 7-Layer Defense in Depth
+
+### Layer 1: Tool Result Storage (`mem-offloader`)
+- **Goal**: Prevent context "flooding" from verbose tool outputs (e.g., long `cat` results).
+- **Mechanism**: If tool output exceeds a configurable threshold (default 2KB), it is persisted to disk. The transcript receives a "Pointer Item" containing a content hash and a 200-character preview.
+- **Trigger**: Proactive check during the `after_tool_call` middleware hook.
+
+### Layer 2: Microcompaction (`mem-compactor`)
+- **Goal**: Maintain high **Prompt Cache** hit rates by preserving prefix stability.
+- **Mechanism**: Silently prunes or summarizes low-value middle items (tool noise, repetitive status) while keeping the system prompt and recent user intent byte-identical.
+- **Trigger**: Context usage exceeding 20% of the model's window.
+
+### Layer 3: Session Log (`mem-session`)
+- **Goal**: Provide a persistent, human-readable markdown summary of the current session.
+- **Mechanism**: The `TodoMiddleware` and `SessionRecorder` maintain a `.agent/session.md` file that maps high-level progress and pending tasks.
+- **Trigger**: Every 5 turns or significant milestone detection.
+
+### Layer 4: Deep Summarization (`mem-compactor`)
+- **Goal**: Emergency context recovery when hard limits are approached.
+- **Mechanism**: A heavyweight `HardLimitCompactor` generates a 9-section structured state report (Goal, Progress, Constraints, etc.) and replaces the bulk of the history with this distilled core.
+- **Trigger**: Approaching 80% of the model's hard context limit (e.g., 160k tokens for a 200k model).
+
+### Layer 5: Fact Extraction (`mem-extractor`)
+- **Goal**: Durable knowledge retention across disconnected sessions.
+- **Mechanism**: Proactively extracts "Project Settings," "User Preferences," and "Technical Facts" into `.agent/knowledge.json`.
+- **Trigger**: Executed during `before_ai_call` (RAG retrieval) and `after_ai_call` (New fact discovery). Hardened for streaming via the `run_stream` wrapper.
+
+### Layer 6: Dreaming (`mem-dreamer`)
+- **Goal**: Background consolidation and contradiction resolution.
+- **Mechanism**: A decoupled background process takes a snapshot of the memory vault, resolves conflicting facts, and optimizes stored knowledge files during idle time.
+- **Trigger**: PID-locked background execution when system idle > 5 minutes.
+
+### Layer 7: Cross-Agent Comms (`mem-broker`)
+- **Goal**: Efficient context sharing between parent and sub-agents.
+- **Mechanism**: Uses the `AgentBridge` to share specialized "Frozen Contexts" with child processes via IPC or JSON-RPC, avoiding full transcript duplication.
+- **Trigger**: Parallel task spawning or expert skill delegation.
+
+---
+
+## Design Principles (Hardened)
+
+1. **Byte-Identical Prefixes**: All compaction layers (L2, L4) are designed to preserve the start of the prompt to maximize LLM provider caching.
+2. **Atomic Persistence**: Every memory update follows a "Write-to-Temp-then-Rename" pattern to prevent corruption during unexpected crashes.
+3. **Resilient Control**: The `ResilientMemoryController` manages all layers, enforcing failure thresholds and guaranteed cleanup of temporary artifacts.
+4. **Whitelist-First Safety**: Memory updates from tools are only processed after passing the `CommandValidator` whitelist check.
