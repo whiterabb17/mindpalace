@@ -440,6 +440,8 @@ impl<S: StorageBackend> StorageBackend for EncryptedStorageBackend<S> {
     pub prompt: String, 
     /// Current conversation context.
     pub context: Arc<Context>, 
+    /// Available tool definitions for discovery.
+    pub tools: Vec<ToolDefinition>,
 }
 
 /// Standardized response for model providers.
@@ -471,6 +473,14 @@ impl<S: StorageBackend> StorageBackend for EncryptedStorageBackend<S> {
 
 /// Internal delta for tool call streaming.
 #[derive(Debug, Clone, Serialize, Deserialize)] pub struct ToolCallDelta { pub name: Option<String>, pub arguments_delta: Option<String>, }
+/// Metadata for discovering available tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
 /// A specific tool execution request from the AI.
 #[derive(Debug, Clone, Serialize, Deserialize)] pub struct ToolCall { pub name: String, pub arguments: serde_json::Value, }
 
