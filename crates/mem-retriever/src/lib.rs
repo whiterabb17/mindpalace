@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use ruvector_core::index::hnsw::HnswIndex;
 use ruvector_core::index::VectorIndex;
-use ruvector_core::types::{DistanceMetric, VectorId, HnswConfig};
+pub use ruvector_core::types::{DistanceMetric, VectorId, HnswConfig};
 
 /// Interface for semantic search and storage of facts in a vector space.
 #[async_trait]
