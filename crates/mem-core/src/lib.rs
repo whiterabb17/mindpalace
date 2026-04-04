@@ -487,7 +487,39 @@ pub trait ModelProvider: Send + Sync {
 pub struct OllamaProvider { pub client: ollama_rs::Ollama, pub model: String, pub embedding_model: String, }
 impl OllamaProvider { pub fn new(model: String, embedding_model: String) -> Self { Self { client: ollama_rs::Ollama::default(), model, embedding_model } } }
 #[async_trait] impl LlmClient for OllamaProvider { async fn completion(&self, prompt: &str) -> anyhow::Result<String> { use ollama_rs::generation::completion::request::GenerationRequest; let res = self.client.generate(GenerationRequest::new(self.model.clone(), prompt.to_string())).await?; Ok(res.response) } }
-#[async_trait] impl ModelProvider for OllamaProvider { async fn complete(&self, req: Request) -> anyhow::Result<Response> { let content = self.completion(&req.prompt).await?; Ok(Response { content, tool_calls: vec![] }) } async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> { use ollama_rs::generation::completion::request::GenerationRequest; let mut stream = self.client.generate_stream(GenerationRequest::new(self.model.clone(), req.prompt)).await?; let stream = async_stream::try_stream! { while let Some(res) = stream.next().await { let res_vec = res.map_err(|e| anyhow::anyhow!(e))?; for res_item in res_vec { yield ResponseChunk { content_delta: Some(res_item.response), tool_call_delta: None, usage: None, is_final: res_item.done }; if res_item.done { break; } } } }; Ok(Box::pin(stream)) } }
+#[async_trait]
+impl ModelProvider for OllamaProvider {
+    async fn complete(&self, req: Request) -> anyhow::Result<Response> {
+        let content = self.completion(&req.prompt).await?;
+        Ok(Response { content, tool_calls: vec![] })
+    }
+    async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
+        use ollama_rs::generation::completion::request::GenerationRequest;
+        let mut stream = self.client.generate_stream(GenerationRequest::new(self.model.clone(), req.prompt)).await?;
+        let stream = async_stream::try_stream! {
+            while let Some(res) = stream.next().await {
+                let res_vec = res.map_err(|e| anyhow::anyhow!(e))?;
+                for res_item in res_vec {
+                    yield ResponseChunk { content_delta: Some(res_item.response), tool_call_delta: None, usage: None, is_final: res_item.done };
+                    if res_item.done { break; }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for OllamaProvider {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        use ollama_rs::generation::embeddings::request::GenerateEmbeddingsRequest;
+        let res = self.client.generate_embeddings(GenerateEmbeddingsRequest::new(
+            self.embedding_model.clone(), 
+            text.to_string().into()
+        )).await?;
+        Ok(res.embeddings.into_iter().next().unwrap_or_default())
+    }
+}
 
 /// Anthropic API provider.
 pub struct AnthropicProvider { pub api_key: String, pub model: String, }
@@ -612,6 +644,15 @@ impl ModelProvider for AnthropicProvider {
         };
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for AnthropicProvider {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        // Anthropic does not provide a native embedding API.
+        // Return a zero vector (1536 dims) as a placeholder.
+        Ok(vec![0.0; 1536])
     }
 }
 
@@ -754,6 +795,33 @@ impl ModelProvider for OpenAiProvider {
     }
 }
 
+#[async_trait]
+impl EmbeddingProvider for OpenAiProvider {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        #[derive(Serialize)]
+        struct EmbRequest { input: String, model: String }
+        #[derive(Deserialize)]
+        struct EmbResponse { data: Vec<EmbData> }
+        #[derive(Deserialize)]
+        struct EmbData { embedding: Vec<f32> }
+
+        let client = reqwest::Client::new();
+        let model = if self.model.contains("gpt") { "text-embedding-3-small" } else { &self.model };
+        let res = client.post("https://api.openai.com/v1/embeddings")
+            .bearer_auth(&self.api_key)
+            .json(&EmbRequest { input: text.to_string(), model: model.to_string() })
+            .send().await?;
+        
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("OpenAI Embedding error: {}", err);
+        }
+        
+        let data: EmbResponse = res.json().await?;
+        Ok(data.data.first().map(|d| d.embedding.clone()).unwrap_or_default())
+    }
+}
+
 /// Google Gemini API provider.
 pub struct GeminiProvider { pub api_key: String, pub model: String, }
 impl GeminiProvider { pub fn new(api_key: String, model: String) -> Self { Self { api_key, model } } }
@@ -841,6 +909,35 @@ impl ModelProvider for GeminiProvider {
         };
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for GeminiProvider {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        #[derive(Serialize)]
+        struct GemEmbRequest { content: GemEmbContent }
+        #[derive(Serialize)]
+        struct GemEmbContent { parts: Vec<GemEmbPart> }
+        #[derive(Serialize)]
+        struct GemEmbPart { text: String }
+        #[derive(Deserialize)]
+        struct GemEmbResponse { embedding: GemEmbValue }
+        #[derive(Deserialize)]
+        struct GemEmbValue { values: Vec<f32> }
+
+        let client = reqwest::Client::new();
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={}", self.api_key);
+        let req = GemEmbRequest { content: GemEmbContent { parts: vec![GemEmbPart { text: text.to_string() }] } };
+        let res = client.post(&url).json(&req).send().await?;
+        
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("Gemini Embedding error: {}", err);
+        }
+        
+        let data: GemEmbResponse = res.json().await?;
+        Ok(data.embedding.values)
     }
 }
 
