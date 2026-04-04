@@ -1,2 +1,4 @@
 target
 *.lock
+gaps.md
+future_implementation.md
