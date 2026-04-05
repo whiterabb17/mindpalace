@@ -991,6 +991,7 @@ pub mod config;
 pub use config::MindPalaceConfig;
 
 pub mod analysis;
+pub mod metrics;
 
 /// Utility functions for memory compression and comparison.
 pub mod utils { 
