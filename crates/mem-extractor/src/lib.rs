@@ -107,6 +107,31 @@ HISTORY:
     }
 }
 
+#[async_trait]
+impl<S: StorageBackend> mem_core::RelevanceAnalyzer for FactExtractor<S> {
+    async fn score_relevance(&self, item: &mem_core::MemoryItem, context: &mem_core::Context) -> anyhow::Result<f32> {
+        let item_emb = self.embeddings.embed(&item.content).await?;
+        let mut sim = 0.0;
+        let mut count = 0;
+        for other in context.items.iter().rev().take(3) {
+            let other_emb = self.embeddings.embed(&other.content).await?;
+            sim += mem_core::utils::cosine_similarity(&item_emb, &other_emb);
+            count += 1;
+        }
+        if count == 0 { return Ok(1.0); }
+        Ok(sim / count as f32)
+    }
+}
+
+#[async_trait]
+impl<S: StorageBackend> mem_core::ImportanceAnalyzer for FactExtractor<S> {
+    async fn score_importance(&self, item: &mem_core::MemoryItem, _context: &mem_core::Context) -> anyhow::Result<f32> {
+        let prompt = format!("Rate importance (0.0-1.0): {}", item.content);
+        let res = self.llm.completion(&prompt).await?;
+        Ok(res.trim().parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0))
+    }
+}
+
 /// A specialized service for identifying and resolving contradictions within the KnowledgeBase.
 pub struct ConflictResolver { 
     /// Client for model calls during conflict arbitration.

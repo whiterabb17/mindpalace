@@ -486,7 +486,7 @@ pub struct ToolDefinition {
 
 /// A provider bridging an external AI model into the MindPalace ecosystem.
 #[async_trait]
-pub trait ModelProvider: Send + Sync {
+pub trait ModelProvider: LlmClient + Send + Sync {
     /// Non-streaming completion.
     async fn complete(&self, req: Request) -> anyhow::Result<Response>;
     /// Streaming completion returning a boxed stream of chunks.
@@ -578,13 +578,42 @@ struct AnthropicRequest {
     model: String,
     max_tokens: u32,
     messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<AnthropicTool>,
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicTool {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: AnthropicContentUnion,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum AnthropicContentUnion {
+    Single(String),
+    Multiple(Vec<AnthropicContent>),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicContent {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Deserialize)]
@@ -592,10 +621,6 @@ struct AnthropicResponse {
     content: Vec<AnthropicContent>,
 }
 
-#[derive(Deserialize)]
-struct AnthropicContent {
-    text: String,
-}
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -625,8 +650,11 @@ struct AnthropicUsage {
 impl LlmClient for AnthropicProvider {
     async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
-        let messages = vec![AnthropicMessage { role: "user".into(), content: prompt.into() }];
-        let req = AnthropicRequest { model: self.model.clone(), max_tokens: 4096, messages, stream: false };
+        let messages = vec![AnthropicMessage { 
+            role: "user".into(), 
+            content: AnthropicContentUnion::Single(prompt.into()) 
+        }];
+        let req = AnthropicRequest { model: self.model.clone(), max_tokens: 4096, messages, tools: vec![], stream: false };
         
         let res = client.post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
@@ -640,21 +668,112 @@ impl LlmClient for AnthropicProvider {
         }
         
         let data: AnthropicResponse = res.json().await?;
-        Ok(data.content.first().map(|c| c.text.clone()).unwrap_or_default())
+        let mut text = String::new();
+        for item in data.content {
+            if let AnthropicContent::Text { text: t } = item {
+                text.push_str(&t);
+            }
+        }
+        Ok(text)
     }
 }
 
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
-        let content = self.completion(&req.prompt).await?;
-        Ok(Response { content, tool_calls: vec![] })
+        let client = reqwest::Client::new();
+        let mut messages = Vec::new();
+
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => "user",
+                _ => "assistant",
+            };
+            messages.push(AnthropicMessage {
+                role: role.to_string(),
+                content: AnthropicContentUnion::Single(item.content.clone()),
+            });
+        }
+
+        messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContentUnion::Single(req.prompt),
+        });
+
+        let tools = req.tools.into_iter().map(|t| AnthropicTool {
+            name: t.name,
+            description: t.description,
+            input_schema: t.parameters,
+        }).collect();
+
+        let anthropic_req = AnthropicRequest {
+            model: self.model.clone(),
+            max_tokens: 4096,
+            messages,
+            tools,
+            stream: false,
+        };
+
+        let res = client.post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&anthropic_req)
+            .send().await?;
+
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("Anthropic API error: {}", err);
+        }
+
+        let data: AnthropicResponse = res.json().await?;
+        let mut content = String::new();
+        let mut tool_calls = Vec::new();
+
+        for item in data.content {
+            match item {
+                AnthropicContent::Text { text } => content.push_str(&text),
+                AnthropicContent::ToolUse { name, input, .. } => {
+                    tool_calls.push(ToolCall { name, arguments: input });
+                }
+            }
+        }
+
+        Ok(Response { content, tool_calls })
     }
 
     async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         let client = reqwest::Client::new();
-        let messages = vec![AnthropicMessage { role: "user".into(), content: req.prompt.clone() }];
-        let anthropic_req = AnthropicRequest { model: self.model.clone(), max_tokens: 4096, messages, stream: true };
+        let mut messages = Vec::new();
+
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => "user",
+                _ => "assistant",
+            };
+            messages.push(AnthropicMessage {
+                role: role.to_string(),
+                content: AnthropicContentUnion::Single(item.content.clone()),
+            });
+        }
+
+        messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: AnthropicContentUnion::Single(req.prompt),
+        });
+
+        let tools = req.tools.into_iter().map(|t| AnthropicTool {
+            name: t.name,
+            description: t.description,
+            input_schema: t.parameters,
+        }).collect();
+
+        let anthropic_req = AnthropicRequest {
+            model: self.model.clone(),
+            max_tokens: 4096,
+            messages,
+            tools,
+            stream: true,
+        };
 
         let res = client.post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
@@ -712,8 +831,24 @@ impl OpenAiProvider { pub fn new(api_key: String, model: String) -> Self { Self 
 struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
     stream: bool,
     stream_options: Option<OpenAiStreamOptions>,
+}
+
+#[derive(Serialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    r#type: String,
+    function: OpenAiFunction,
+}
+
+#[derive(Serialize)]
+struct OpenAiFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -724,7 +859,24 @@ struct OpenAiStreamOptions {
 #[derive(Serialize, Deserialize)]
 struct OpenAiMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    r#type: String,
+    function: OpenAiFunctionCall,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OpenAiFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -739,7 +891,8 @@ struct OpenAiChoice {
 
 #[derive(Deserialize)]
 struct OpenAiResponseMessage {
-    content: String,
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
 #[derive(Deserialize)]
@@ -764,14 +917,34 @@ struct OpenAiStreamChoice {
 #[derive(Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiToolCallDelta {
+    index: Option<u32>,
+    id: Option<String>,
+    #[serde(rename = "type")]
+    r#type: Option<String>,
+    function: Option<OpenAiFunctionCallDelta>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiFunctionCallDelta {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 #[async_trait]
 impl LlmClient for OpenAiProvider {
     async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
-        let messages = vec![OpenAiMessage { role: "user".into(), content: prompt.into() }];
-        let req = OpenAiRequest { model: self.model.clone(), messages, stream: false, stream_options: None };
+        let messages = vec![OpenAiMessage { 
+            role: "user".into(), 
+            content: Some(prompt.into()),
+            tool_calls: None 
+        }];
+        let req = OpenAiRequest { model: self.model.clone(), messages, tools: vec![], stream: false, stream_options: None };
         
         let res = client.post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(&self.api_key)
@@ -784,23 +957,122 @@ impl LlmClient for OpenAiProvider {
         }
             
         let data: OpenAiResponse = res.json().await?;
-        Ok(data.choices.first().map(|c| c.message.content.clone()).unwrap_or_default())
+        Ok(data.choices.first().and_then(|c| c.message.content.clone()).unwrap_or_default())
     }
 }
 
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
-        let content = self.completion(&req.prompt).await?;
-        Ok(Response { content, tool_calls: vec![] })
+        let client = reqwest::Client::new();
+        let mut messages = Vec::new();
+
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => "user",
+                MemoryRole::Assistant => "assistant",
+                MemoryRole::Tool => "tool",
+                MemoryRole::System => "system",
+            };
+            messages.push(OpenAiMessage {
+                role: role.to_string(),
+                content: Some(item.content.clone()),
+                tool_calls: None,
+            });
+        }
+
+        messages.push(OpenAiMessage {
+            role: "user".to_string(),
+            content: Some(req.prompt),
+            tool_calls: None,
+        });
+
+        let tools = req.tools.into_iter().map(|t| OpenAiTool {
+            r#type: "function".to_string(),
+            function: OpenAiFunction {
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters,
+            },
+        }).collect();
+
+        let openai_req = OpenAiRequest {
+            model: self.model.clone(),
+            messages,
+            tools,
+            stream: false,
+            stream_options: None,
+        };
+
+        let res = client.post("https://api.openai.com/v1/chat/completions")
+            .bearer_auth(&self.api_key)
+            .json(&openai_req)
+            .send().await?;
+            
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("OpenAI API error: {}", err);
+        }
+            
+        let data: OpenAiResponse = res.json().await?;
+        let mut content = String::new();
+        let mut tool_calls = Vec::new();
+
+        if let Some(choice) = data.choices.first() {
+            if let Some(ref text) = choice.message.content {
+                content.push_str(text);
+            }
+            if let Some(ref tcs) = choice.message.tool_calls {
+                for tc in tcs {
+                    if let Ok(args) = serde_json::from_str(&tc.function.arguments) {
+                        tool_calls.push(ToolCall {
+                            name: tc.function.name.clone(),
+                            arguments: args,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(Response { content, tool_calls })
     }
 
     async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         let client = reqwest::Client::new();
-        let messages = vec![OpenAiMessage { role: "user".into(), content: req.prompt.clone() }];
+        let mut messages = Vec::new();
+
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => "user",
+                MemoryRole::Assistant => "assistant",
+                _ => "system",
+            };
+            messages.push(OpenAiMessage {
+                role: role.to_string(),
+                content: Some(item.content.clone()),
+                tool_calls: None,
+            });
+        }
+
+        messages.push(OpenAiMessage {
+            role: "user".to_string(),
+            content: Some(req.prompt),
+            tool_calls: None,
+        });
+
+        let tools = req.tools.into_iter().map(|t| OpenAiTool {
+            r#type: "function".to_string(),
+            function: OpenAiFunction {
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters,
+            },
+        }).collect();
+
         let openai_req = OpenAiRequest { 
             model: self.model.clone(), 
             messages, 
+            tools,
             stream: true, 
             stream_options: Some(OpenAiStreamOptions { include_usage: true }) 
         };
@@ -828,9 +1100,20 @@ impl ModelProvider for OpenAiProvider {
 
                             if let Some(choice) = event.choices.first() {
                                 let is_final = choice.finish_reason.is_some();
-                                yield ResponseChunk { content_delta: choice.delta.content.clone(), tool_call_delta: None, usage, is_final };
+                                let content_delta = choice.delta.content.clone();
+                                let mut tool_call_delta = None;
+                                
+                                if let Some(ref tcs) = choice.delta.tool_calls {
+                                    if let Some(tc) = tcs.first() {
+                                        tool_call_delta = Some(ToolCallDelta {
+                                            name: tc.function.as_ref().and_then(|f| f.name.clone()),
+                                            arguments_delta: tc.function.as_ref().and_then(|f| f.arguments.clone()),
+                                        });
+                                    }
+                                }
+                                
+                                yield ResponseChunk { content_delta, tool_call_delta, usage, is_final };
                             } else if usage.is_some() {
-                                // OpenAI usage-only chunk
                                 yield ResponseChunk { content_delta: None, tool_call_delta: None, usage, is_final: true };
                             }
                         }
@@ -877,6 +1160,20 @@ impl GeminiProvider { pub fn new(api_key: String, model: String) -> Self { Self 
 #[derive(Serialize)]
 struct GeminiRequest {
     contents: Vec<GeminiContent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<GeminiTool>,
+}
+
+#[derive(Serialize)]
+struct GeminiTool {
+    function_declarations: Vec<GeminiFunctionDeclaration>,
+}
+
+#[derive(Serialize)]
+struct GeminiFunctionDeclaration {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -887,7 +1184,16 @@ struct GeminiContent {
 
 #[derive(Serialize, Deserialize)]
 struct GeminiPart {
-    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(rename = "functionCall", skip_serializing_if = "Option::is_none")]
+    function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    args: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -904,8 +1210,11 @@ struct GeminiCandidate {
 impl LlmClient for GeminiProvider {
     async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
         let client = reqwest::Client::new();
-        let contents = vec![GeminiContent { role: "user".into(), parts: vec![GeminiPart { text: prompt.into() }] }];
-        let req = GeminiRequest { contents };
+        let contents = vec![GeminiContent { 
+            role: "user".into(), 
+            parts: vec![GeminiPart { text: Some(prompt.to_string()), function_call: None }] 
+        }];
+        let req = GeminiRequest { contents, tools: vec![] };
         
         let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", self.model, self.api_key);
         let res = client.post(&url)
@@ -918,23 +1227,110 @@ impl LlmClient for GeminiProvider {
         }
 
         let data: GeminiResponse = res.json().await?;
-        Ok(data.candidates.first().and_then(|c| c.content.parts.first()).map(|p| p.text.clone()).unwrap_or_default())
+        Ok(data.candidates.first().and_then(|c| c.content.parts.first()).and_then(|p| p.text.clone()).unwrap_or_default())
     }
 }
 
 #[async_trait]
 impl ModelProvider for GeminiProvider {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
-        let content = self.completion(&req.prompt).await?;
-        Ok(Response { content, tool_calls: vec![] })
+        let client = reqwest::Client::new();
+        let mut contents = Vec::new();
+        
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => "user",
+                _ => "model",
+            };
+            contents.push(GeminiContent {
+                role: role.to_string(),
+                parts: vec![GeminiPart { text: Some(item.content.clone()), function_call: None }],
+            });
+        }
+        
+        contents.push(GeminiContent {
+            role: "user".to_string(),
+            parts: vec![GeminiPart { text: Some(req.prompt), function_call: None }],
+        });
+
+        let tools = if req.tools.is_empty() {
+            vec![]
+        } else {
+            let decls = req.tools.into_iter().map(|t| GeminiFunctionDeclaration {
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters,
+            }).collect();
+            vec![GeminiTool { function_declarations: decls }]
+        };
+
+        let gemini_req = GeminiRequest { contents, tools };
+        let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", self.model, self.api_key);
+        
+        let res = client.post(&url)
+            .json(&gemini_req)
+            .send().await?;
+
+        if !res.status().is_success() {
+            let err = res.text().await?;
+            anyhow::bail!("Gemini API error: {}", err);
+        }
+
+        let data: GeminiResponse = res.json().await?;
+        let mut content = String::new();
+        let mut tool_calls = Vec::new();
+
+        if let Some(candidate) = data.candidates.first() {
+            for part in &candidate.content.parts {
+                if let Some(ref t) = part.text {
+                    content.push_str(t);
+                }
+                if let Some(ref fc) = part.function_call {
+                    tool_calls.push(ToolCall {
+                        name: fc.name.clone(),
+                        arguments: fc.args.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(Response { content, tool_calls })
     }
 
     async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         let client = reqwest::Client::new();
-        let contents = vec![GeminiContent { role: "user".into(), parts: vec![GeminiPart { text: req.prompt }] }];
-        let gemini_req = GeminiRequest { contents };
+        let mut contents = Vec::new();
         
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => "user",
+                _ => "model",
+            };
+            contents.push(GeminiContent {
+                role: role.to_string(),
+                parts: vec![GeminiPart { text: Some(item.content.clone()), function_call: None }],
+            });
+        }
+        
+        contents.push(GeminiContent {
+            role: "user".to_string(),
+            parts: vec![GeminiPart { text: Some(req.prompt), function_call: None }],
+        });
+
+        let tools = if req.tools.is_empty() {
+            vec![]
+        } else {
+            let decls = req.tools.into_iter().map(|t| GeminiFunctionDeclaration {
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters,
+            }).collect();
+            vec![GeminiTool { function_declarations: decls }]
+        };
+
+        let gemini_req = GeminiRequest { contents, tools };
         let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}", self.model, self.api_key);
+        
         let res = client.post(&url)
             .json(&gemini_req)
             .send().await?;
@@ -943,11 +1339,28 @@ impl ModelProvider for GeminiProvider {
             let mut byte_stream = res.bytes_stream();
             while let Some(chunk) = byte_stream.next().await {
                 let bytes = chunk?;
+                
+                // Gemini stream is usually a JSON array or multiple JSON objects. 
+                // Basic implementation here: try to parse as Vec<GeminiResponse>
                 if let Ok(event) = serde_json::from_slice::<Vec<GeminiResponse>>(&bytes) {
                     for res in event {
                         if let Some(candidate) = res.candidates.first() {
-                            if let Some(part) = candidate.content.parts.first() {
-                                yield ResponseChunk { content_delta: Some(part.text.clone()), tool_call_delta: None, usage: None, is_final: false };
+                            for part in &candidate.content.parts {
+                                let mut content_delta = None;
+                                let mut tool_call_delta = None;
+                                
+                                if let Some(ref t) = part.text {
+                                    content_delta = Some(t.clone());
+                                }
+                                
+                                if let Some(ref fc) = part.function_call {
+                                    tool_call_delta = Some(ToolCallDelta {
+                                        name: Some(fc.name.clone()),
+                                        arguments_delta: Some(serde_json::to_string(&fc.args).unwrap_or_else(|_| "{}".into())),
+                                    });
+                                }
+                                
+                                yield ResponseChunk { content_delta, tool_call_delta, usage: None, is_final: false };
                             }
                         }
                     }
