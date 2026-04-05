@@ -1,0 +1,42 @@
+{
+  "title": "MindPalace Analyzer Metrics",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "LLM Latency",
+      "targets": [
+        {
+          "expr": "rate(mindpalace_llm_analyzer_latency_seconds_sum[1m]) / rate(mindpalace_llm_analyzer_latency_seconds_count[1m])",
+          "legendFormat": "Avg Latency"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "LLM Timeouts",
+      "targets": [
+        {
+          "expr": "increase(mindpalace_llm_analyzer_timeouts_total[1m])"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache Hit Rate",
+      "targets": [
+        {
+          "expr": "rate(mindpalace_vector_cache_hits_total[5m]) / (rate(mindpalace_vector_cache_hits_total[5m]) + rate(mindpalace_vector_cache_misses_total[5m]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Circuit Breaker State",
+      "targets": [
+        {
+          "expr": "mindpalace_circuit_breaker_state"
+        }
+      ]
+    }
+  ]
+}

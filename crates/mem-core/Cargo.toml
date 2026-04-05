@@ -29,3 +29,10 @@ regex.workspace = true
 once_cell.workspace = true
 tracing.workspace = true
 moka = { version = "0.12.15", features = ["future"] }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+
+[[bench]]
+name = "analyzer_benchmarks"
+harness = false
