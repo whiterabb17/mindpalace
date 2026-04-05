@@ -1,5 +1,4 @@
 use mem_core::{FactGraph, FactNode};
-use std::sync::Arc;
 
 #[test]
 fn test_fact_graph_serialization_roundtrip() {
