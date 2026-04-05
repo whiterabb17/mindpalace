@@ -1121,19 +1121,34 @@ impl ModelProvider for OpenAiProvider {
 
                             if let Some(choice) = event.choices.first() {
                                 let is_final = choice.finish_reason.is_some();
-                                let content_delta = choice.delta.content.clone();
-                                let mut tool_call_delta = None;
                                 
+                                if let Some(ref content) = choice.delta.content {
+                                    yield ResponseChunk { 
+                                        content_delta: Some(content.clone()), 
+                                        tool_call_delta: None, 
+                                        usage: None, 
+                                        is_final: false 
+                                    };
+                                }
+
                                 if let Some(ref tcs) = choice.delta.tool_calls {
-                                    if let Some(tc) = tcs.first() {
-                                        tool_call_delta = Some(ToolCallDelta {
+                                    for tc in tcs {
+                                        let tool_call_delta = Some(ToolCallDelta {
                                             name: tc.function.as_ref().and_then(|f| f.name.clone()),
                                             arguments_delta: tc.function.as_ref().and_then(|f| f.arguments.clone()),
                                         });
+                                        yield ResponseChunk { 
+                                            content_delta: None, 
+                                            tool_call_delta, 
+                                            usage: None, 
+                                            is_final: false 
+                                        };
                                     }
                                 }
-                                
-                                yield ResponseChunk { content_delta, tool_call_delta, usage, is_final };
+
+                                if is_final {
+                                    yield ResponseChunk { content_delta: None, tool_call_delta: None, usage: None, is_final: true };
+                                }
                             } else if usage.is_some() {
                                 yield ResponseChunk { content_delta: None, tool_call_delta: None, usage, is_final: true };
                             }
