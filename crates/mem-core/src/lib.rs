@@ -863,6 +863,8 @@ struct OpenAiMessage {
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -921,6 +923,7 @@ struct OpenAiDelta {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiToolCallDelta {
     index: Option<u32>,
     id: Option<String>,
@@ -942,7 +945,8 @@ impl LlmClient for OpenAiProvider {
         let messages = vec![OpenAiMessage { 
             role: "user".into(), 
             content: Some(prompt.into()),
-            tool_calls: None 
+            tool_calls: None,
+            tool_call_id: None,
         }];
         let req = OpenAiRequest { model: self.model.clone(), messages, tools: vec![], stream: false, stream_options: None };
         
@@ -974,10 +978,17 @@ impl ModelProvider for OpenAiProvider {
                 MemoryRole::Tool => "tool",
                 MemoryRole::System => "system",
             };
+            
+            let tool_calls = item.metadata.get("tool_calls")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let tool_call_id = item.metadata.get("tool_call_id")
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+
             messages.push(OpenAiMessage {
                 role: role.to_string(),
                 content: Some(item.content.clone()),
-                tool_calls: None,
+                tool_calls,
+                tool_call_id,
             });
         }
 
@@ -985,6 +996,7 @@ impl ModelProvider for OpenAiProvider {
             role: "user".to_string(),
             content: Some(req.prompt),
             tool_calls: None,
+            tool_call_id: None,
         });
 
         let tools = req.tools.into_iter().map(|t| OpenAiTool {
@@ -1045,12 +1057,20 @@ impl ModelProvider for OpenAiProvider {
             let role = match item.role {
                 MemoryRole::User => "user",
                 MemoryRole::Assistant => "assistant",
-                _ => "system",
+                MemoryRole::Tool => "tool",
+                MemoryRole::System => "system",
             };
+            
+            let tool_calls = item.metadata.get("tool_calls")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let tool_call_id = item.metadata.get("tool_call_id")
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+
             messages.push(OpenAiMessage {
                 role: role.to_string(),
                 content: Some(item.content.clone()),
-                tool_calls: None,
+                tool_calls,
+                tool_call_id,
             });
         }
 
@@ -1058,6 +1078,7 @@ impl ModelProvider for OpenAiProvider {
             role: "user".to_string(),
             content: Some(req.prompt),
             tool_calls: None,
+            tool_call_id: None,
         });
 
         let tools = req.tools.into_iter().map(|t| OpenAiTool {
