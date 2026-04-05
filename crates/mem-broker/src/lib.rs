@@ -54,7 +54,14 @@ impl<S: StorageBackend> FactBroker<S> {
             if !file_id.ends_with(".json") { continue; }
             let full_id = format!("shared_kb/{}", file_id);
             let data = self.shared_storage.retrieve(&full_id).await?;
-            let fact: FactNode = serde_json::from_slice(&data)?;
+            if data.is_empty() { continue; }
+            let fact: FactNode = match serde_json::from_slice(&data) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("Failed to parse shared fact {}: {}. Skipping.", full_id, e);
+                    continue;
+                }
+            };
             shared_facts.push(fact);
         }
 

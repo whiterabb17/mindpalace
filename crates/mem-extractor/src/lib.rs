@@ -38,6 +38,7 @@ impl<S: StorageBackend> FactExtractor<S> {
         for item in &context.items { history.push_str(&format!("{:?}: {}\n", item.role, item.content)); }
         let prompt = format!(
 "Analyze conversation and extract durable facts as JSON array. 
+Output ONLY the JSON array, no preamble, summary, or markdown formatting blocks.
 Fields: 
 - category: Technical or personal category
 - content: Precise fact
@@ -49,8 +50,30 @@ Fields:
 HISTORY:
 {}", history);
         let response = self.llm.completion(&prompt).await?;
-        let cleaned = response.trim().trim_start_matches("```json").trim_end_matches("```").trim();
-        let raw_facts: Vec<serde_json::Value> = serde_json::from_str(cleaned)?;
+        if response.trim().is_empty() { return Ok(Vec::new()); }
+        
+        // Find the JSON block between [ and ]
+        let cleaned = if let (Some(start), Some(end)) = (response.find('['), response.rfind(']')) {
+            &response[start..=end]
+        } else {
+            response.trim().trim_start_matches("```json").trim_end_matches("```").trim()
+        };
+
+        let raw_facts: Vec<serde_json::Value> = match serde_json::from_str(cleaned) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Harden extraction: falling back to string trim parsing. Error: {}", e);
+                // Fallback for non-nested JSON or partial match
+                let fallback_cleaned = response.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+                match serde_json::from_str(fallback_cleaned) {
+                    Ok(f) => f,
+                    Err(e2) => {
+                        tracing::error!("Failed to parse facts from AI response: {}. Response: {}", e2, cleaned);
+                        return Ok(Vec::new());
+                    }
+                }
+            }
+        };
         Ok(raw_facts.into_iter().filter_map(|v| {
             if let (Some(cat), Some(cont), Some(conf)) = (v["category"].as_str(), v["content"].as_str(), v["confidence"].as_f64()) {
                 let mut node = FactNode::new(cont.to_string(), cat.to_string(), conf as f32, self.session_id.clone());
@@ -84,7 +107,11 @@ HISTORY:
     pub async fn commit_knowledge(&self, new_facts: Vec<FactNode>) -> anyhow::Result<()> {
         let mut kb = if self.storage.exists(&self.knowledge_path).await {
             let data = self.storage.retrieve(&self.knowledge_path).await?;
-            serde_json::from_slice(&data).unwrap_or_else(|_| KnowledgeBase::new(None).unwrap())
+            if data.is_empty() { 
+                KnowledgeBase::new(None)? 
+            } else {
+                serde_json::from_slice(&data).unwrap_or_else(|_| KnowledgeBase::new(None).unwrap_or_default())
+            }
         } else { KnowledgeBase::new(None)? };
 
         for fact in new_facts {
@@ -126,9 +153,17 @@ impl<S: StorageBackend> mem_core::RelevanceAnalyzer for FactExtractor<S> {
 #[async_trait]
 impl<S: StorageBackend> mem_core::ImportanceAnalyzer for FactExtractor<S> {
     async fn score_importance(&self, item: &mem_core::MemoryItem, _context: &mem_core::Context) -> anyhow::Result<f32> {
-        let prompt = format!("Rate importance (0.0-1.0): {}", item.content);
+        let prompt = format!("Rate importance of this conversation item (0.0 to 1.0). Output ONLY the number.\nCONTENT: {}", item.content);
         let res = self.llm.completion(&prompt).await?;
-        Ok(res.trim().parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0))
+        
+        // Robust numeric extraction: find the first sequence that looks like a float
+        let score = res.split(|c: char| !c.is_ascii_digit() && c != '.')
+            .filter(|s| !s.is_empty())
+            .find_map(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
+            
+        Ok(score)
     }
 }
 
@@ -207,6 +242,9 @@ pub struct ReflectionLayer<S: StorageBackend> {
     /// The primary fact extractor service.
     pub extractor: Arc<FactExtractor<S>>, 
 }
+
+#[cfg(test)]
+mod tests;
 
 impl<S: StorageBackend> ReflectionLayer<S> { pub fn new(extractor: Arc<FactExtractor<S>>) -> Self { Self { extractor } } }
 

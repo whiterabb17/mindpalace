@@ -24,6 +24,7 @@ impl<S: StorageBackend> AgentBridge<S> {
     pub async fn fork_context(&self, snapshot_id: &str) -> anyhow::Result<Context> {
         let path = format!("snapshots/{}.json", snapshot_id);
         let data = self.storage.retrieve(&path).await?;
+        if data.is_empty() { anyhow::bail!("Snapshot {} is empty", snapshot_id); }
         let context: Context = serde_json::from_slice(&data)?;
         tracing::info!("Context forked from: {}", snapshot_id);
         Ok(context)

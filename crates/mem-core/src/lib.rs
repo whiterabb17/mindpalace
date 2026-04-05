@@ -107,20 +107,59 @@ impl FactNode {
     pub fn from_properties(id: String, props: &Properties) -> Self {
         let get_str = |key: &str| {
             props.get(key).and_then(|v| serde_json::to_value(v).ok())
-                .and_then(|jv| if jv.is_string() { jv.as_str().map(|s| s.to_string()) } else { Some(jv.to_string()) })
+                .and_then(|jv| {
+                    if let Some(s) = jv.as_str() { 
+                        Some(s.to_string()) 
+                    } else if let Some(s) = jv.get("String").and_then(|s| s.as_str()) {
+                        Some(s.to_string())
+                    } else { 
+                        None
+                    }
+                })
                 .unwrap_or_default()
         };
         let get_f32 = |key: &str| {
             props.get(key).and_then(|v| serde_json::to_value(v).ok())
-                .and_then(|jv| jv.as_f64()).unwrap_or(0.0) as f32
+                .and_then(|jv| {
+                    if let Some(f) = jv.as_f64() {
+                        Some(f as f32)
+                    } else if let Some(f) = jv.get("Float").and_then(|f| f.as_f64()) {
+                        Some(f as f32)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0.0)
         };
         let get_u64 = |key: &str| {
             props.get(key).and_then(|v| serde_json::to_value(v).ok())
-                .and_then(|jv| jv.as_u64()).unwrap_or(0)
+                .and_then(|jv| {
+                    if let Some(u) = jv.as_u64() {
+                        Some(u)
+                    } else if let Some(u) = jv.get("Int").and_then(|i| i.as_i64()) {
+                        Some(u as u64)
+                    } else if let Some(u) = jv.get("Integer").and_then(|i| i.as_i64()) {
+                        Some(u as u64)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0)
         };
         let get_u32 = |key: &str| {
             props.get(key).and_then(|v| serde_json::to_value(v).ok())
-                .and_then(|jv| jv.as_u64()).unwrap_or(1) as u32
+                .and_then(|jv| {
+                    if let Some(u) = jv.as_u64() {
+                        Some(u as u32)
+                    } else if let Some(u) = jv.get("Int").and_then(|i| i.as_i64()) {
+                        Some(u as u32)
+                    } else if let Some(u) = jv.get("Integer").and_then(|i| i.as_i64()) {
+                        Some(u as u32)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(1)
         };
 
         Self {
@@ -156,18 +195,17 @@ pub struct FactGraph {
 impl Serialize for FactGraph {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: serde::Serializer {
         let ids = self.node_ids.read().unwrap();
-        let ids_vec: Vec<_> = ids.iter().cloned().collect();
-        ids_vec.serialize(serializer)
+        let facts: Vec<FactNode> = ids.iter().filter_map(|id| self.get_fact(id)).collect();
+        facts.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for FactGraph {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> where D: serde::Deserializer<'de> {
-        let ids_vec = Vec::<String>::deserialize(deserializer)?;
+        let facts = Vec::<FactNode>::deserialize(deserializer)?;
         let graph = FactGraph::new(None).map_err(serde::de::Error::custom)?;
-        {
-            let mut ids = graph.node_ids.write().unwrap();
-            for id in ids_vec { ids.insert(id); }
+        for fact in facts {
+            let _ = graph.add_fact(fact);
         }
         Ok(graph)
     }
@@ -528,29 +566,65 @@ impl LlmClient for OllamaProvider {
 #[async_trait]
 impl ModelProvider for OllamaProvider {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
-        let content = self.completion(&req.prompt).await?;
+        use ollama_rs::generation::chat::request::ChatMessageRequest;
+        use ollama_rs::generation::chat::ChatMessage;
+
+        let mut messages = Vec::new();
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => ollama_rs::generation::chat::MessageRole::User,
+                MemoryRole::Assistant => ollama_rs::generation::chat::MessageRole::Assistant,
+                MemoryRole::System => ollama_rs::generation::chat::MessageRole::System,
+                MemoryRole::Tool => ollama_rs::generation::chat::MessageRole::User, // Fallback
+            };
+            messages.push(ChatMessage::new(role, item.content.clone()));
+        }
+
+        messages.push(ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, req.prompt));
+
+        let chat_req = ChatMessageRequest::new(self.model.clone(), messages);
+        let res = self.client.send_chat_messages(chat_req).await?;
+        
+        let content = res.message.content;
+        
         Ok(Response {
             content,
-            tool_calls: vec![],
+            tool_calls: vec![], // Future: Parse tool calls from Ollama response if supported
         })
     }
+
     async fn stream_complete(
         &self,
         req: Request,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
-        use ollama_rs::generation::completion::request::GenerationRequest;
-        let mut gen_req = GenerationRequest::new(self.model.clone(), req.prompt.clone());
-        if let Some(ctx) = self.num_ctx {
-            gen_req = gen_req.options(ollama_rs::generation::options::GenerationOptions::default().num_ctx(ctx.into()));
+        use ollama_rs::generation::chat::request::ChatMessageRequest;
+        use ollama_rs::generation::chat::ChatMessage;
+
+        let mut messages = Vec::new();
+        for item in req.context.items.iter() {
+            let role = match item.role {
+                MemoryRole::User => ollama_rs::generation::chat::MessageRole::User,
+                MemoryRole::Assistant => ollama_rs::generation::chat::MessageRole::Assistant,
+                _ => ollama_rs::generation::chat::MessageRole::User,
+            };
+            messages.push(ChatMessage::new(role, item.content.clone()));
         }
-        let mut stream = self.client.generate_stream(gen_req).await?;
+        messages.push(ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, req.prompt));
+
+        let chat_req = ChatMessageRequest::new(self.model.clone(), messages);
+        let mut stream = self.client.send_chat_messages_stream(chat_req).await?;
+        
         let stream = async_stream::try_stream! {
             while let Some(res) = stream.next().await {
-                let res_vec = res.map_err(|e| anyhow::anyhow!(e))?;
-                for res_item in res_vec {
-                    yield ResponseChunk { content_delta: Some(res_item.response), tool_call_delta: None, usage: None, is_final: res_item.done };
-                    if res_item.done { break; }
-                }
+                let res = res.map_err(|_| anyhow::anyhow!("Ollama stream error"))?;
+                let msg = res.message;
+                yield ResponseChunk { 
+                    content_delta: Some(msg.content), 
+                    tool_call_delta: None, 
+                    usage: None, 
+                    is_final: res.done 
+                };
+                if res.done { break; }
             }
         };
         Ok(Box::pin(stream))
@@ -627,8 +701,10 @@ struct AnthropicResponse {
 enum AnthropicStreamEvent {
     #[serde(rename = "message_start")]
     MessageStart {},
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart { _index: usize, content_block: AnthropicContent },
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta { delta: AnthropicDelta },
+    ContentBlockDelta { _index: usize, delta: AnthropicDelta },
     #[serde(rename = "message_delta")]
     MessageDelta { usage: Option<AnthropicUsage> },
     #[serde(other)]
@@ -636,8 +712,12 @@ enum AnthropicStreamEvent {
 }
 
 #[derive(Deserialize)]
-struct AnthropicDelta {
-    text: String,
+#[serde(tag = "type")]
+enum AnthropicDelta {
+    #[serde(rename = "text_delta")]
+    TextDelta { text: String },
+    #[serde(rename = "input_json_delta")]
+    InputJsonDelta { partial_json: String },
 }
 
 #[derive(Deserialize)]
@@ -791,8 +871,30 @@ impl ModelProvider for AnthropicProvider {
                         let data = line.trim_start_matches("data: ");
                         if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                             match event {
-                                AnthropicStreamEvent::ContentBlockDelta { delta } => {
-                                    yield ResponseChunk { content_delta: Some(delta.text), tool_call_delta: None, usage: None, is_final: false };
+                                AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
+                                    if let AnthropicContent::ToolUse { name, .. } = content_block {
+                                        yield ResponseChunk { 
+                                            content_delta: None, 
+                                            tool_call_delta: Some(ToolCallDelta { name: Some(name), arguments_delta: None }), 
+                                            usage: None, 
+                                            is_final: false 
+                                        };
+                                    }
+                                },
+                                AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
+                                    match delta {
+                                        AnthropicDelta::TextDelta { text } => {
+                                            yield ResponseChunk { content_delta: Some(text), tool_call_delta: None, usage: None, is_final: false };
+                                        },
+                                        AnthropicDelta::InputJsonDelta { partial_json } => {
+                                            yield ResponseChunk { 
+                                                content_delta: None, 
+                                                tool_call_delta: Some(ToolCallDelta { name: None, arguments_delta: Some(partial_json) }), 
+                                                usage: None, 
+                                                is_final: false 
+                                            };
+                                        }
+                                    }
                                 },
                                 AnthropicStreamEvent::MessageDelta { usage } => {
                                     let response_usage = usage.map(|u| ResponseUsage {

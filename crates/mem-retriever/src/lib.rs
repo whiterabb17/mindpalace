@@ -193,7 +193,12 @@ impl<S: StorageBackend> MemoryRetriever<S> {
     pub async fn hydrate_from_kb(&self, kb_path: &str) -> anyhow::Result<()> {
         if !self.storage.exists(kb_path).await { return Ok(()); }
         let data = self.storage.retrieve(kb_path).await?;
-        let kb: KnowledgeBase = serde_json::from_slice(&data)?;
+        if data.is_empty() { return Ok(()); }
+
+        let kb: KnowledgeBase = serde_json::from_slice(&data).unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse knowledge base from {}: {}. Starting fresh.", kb_path, e);
+            KnowledgeBase::new(None).unwrap_or_default()
+        });
         self.store.clear().await?;
         
         for fact in kb.graph.all_active_facts() {

@@ -47,7 +47,14 @@ impl<S: StorageBackend> DreamWorker<S> {
             if !session_name.ends_with(".json") { continue; }
             let session_id = format!("sessions/{}", session_name);
             let data = self.storage.retrieve(&session_id).await?;
-            let context: Context = serde_json::from_slice(&data)?;
+            if data.is_empty() { continue; }
+            let context: Context = match serde_json::from_slice(&data) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Failed to parse session {}: {}. Skipping.", session_id, e);
+                    continue;
+                }
+            };
 
             let mut history = String::new();
             for item in &context.items {

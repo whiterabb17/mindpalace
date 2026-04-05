@@ -17,3 +17,6 @@ tracing.workspace = true
 chrono.workspace = true
 ruvector-core.workspace = true
 ruvector-graph.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
