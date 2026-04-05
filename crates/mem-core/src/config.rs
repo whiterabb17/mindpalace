@@ -24,6 +24,8 @@ pub struct MindPalaceConfig {
     pub max_tokens_per_dream: usize,
     /// Number of sessions to retain during background maintenance.
     pub retention_sessions: usize,
+    /// Maximum context window (tokens) to request from the LLM provider (num_ctx).
+    pub model_context_window: usize,
 }
 
 impl MindPalaceConfig {
@@ -103,6 +105,11 @@ impl MindPalaceConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
+            
+            model_context_window: std::env::var("MODEL_CONTEXT_WINDOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2048),
         };
         
         if let Err(e) = config.validate() {

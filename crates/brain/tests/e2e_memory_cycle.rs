@@ -52,6 +52,7 @@ async fn test_e2e_memory_pipeline_cycle() -> anyhow::Result<()> {
         default_model: "test".to_string(),
         max_tokens_per_dream: 50_000,
         retention_sessions: 10,
+        model_context_window: 2048,
     };
 
     let llm: Arc<dyn LlmClient> = Arc::new(TestLlm);

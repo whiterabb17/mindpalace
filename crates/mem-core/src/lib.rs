@@ -494,18 +494,56 @@ pub trait ModelProvider: Send + Sync {
 }
 
 /// Local LLM provider via Ollama.
-pub struct OllamaProvider { pub client: ollama_rs::Ollama, pub model: String, pub embedding_model: String, }
-impl OllamaProvider { pub fn new(model: String, embedding_model: String) -> Self { Self { client: ollama_rs::Ollama::default(), model, embedding_model } } }
-#[async_trait] impl LlmClient for OllamaProvider { async fn completion(&self, prompt: &str) -> anyhow::Result<String> { use ollama_rs::generation::completion::request::GenerationRequest; let res = self.client.generate(GenerationRequest::new(self.model.clone(), prompt.to_string())).await?; Ok(res.response) } }
+pub struct OllamaProvider {
+    pub client: ollama_rs::Ollama,
+    pub model: String,
+    pub embedding_model: String,
+    pub num_ctx: Option<u32>,
+}
+
+impl OllamaProvider {
+    pub fn new(model: String, embedding_model: String, num_ctx: Option<u32>) -> Self {
+        Self {
+            client: ollama_rs::Ollama::default(),
+            model,
+            embedding_model,
+            num_ctx,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for OllamaProvider {
+    async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
+        use ollama_rs::generation::completion::request::GenerationRequest;
+        let mut gen_req = GenerationRequest::new(self.model.clone(), prompt.to_string());
+        if let Some(ctx) = self.num_ctx {
+            gen_req = gen_req.options(ollama_rs::generation::options::GenerationOptions::default().num_ctx(ctx.into()));
+        }
+        let res = self.client.generate(gen_req).await?;
+        Ok(res.response)
+    }
+}
+
 #[async_trait]
 impl ModelProvider for OllamaProvider {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
         let content = self.completion(&req.prompt).await?;
-        Ok(Response { content, tool_calls: vec![] })
+        Ok(Response {
+            content,
+            tool_calls: vec![],
+        })
     }
-    async fn stream_complete(&self, req: Request) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
+    async fn stream_complete(
+        &self,
+        req: Request,
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         use ollama_rs::generation::completion::request::GenerationRequest;
-        let mut stream = self.client.generate_stream(GenerationRequest::new(self.model.clone(), req.prompt.clone())).await?;
+        let mut gen_req = GenerationRequest::new(self.model.clone(), req.prompt.clone());
+        if let Some(ctx) = self.num_ctx {
+            gen_req = gen_req.options(ollama_rs::generation::options::GenerationOptions::default().num_ctx(ctx.into()));
+        }
+        let mut stream = self.client.generate_stream(gen_req).await?;
         let stream = async_stream::try_stream! {
             while let Some(res) = stream.next().await {
                 let res_vec = res.map_err(|e| anyhow::anyhow!(e))?;
