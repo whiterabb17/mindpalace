@@ -522,9 +522,21 @@ pub struct ToolDefinition {
 /// A specific tool execution request from the AI.
 #[derive(Debug, Clone, Serialize, Deserialize)] pub struct ToolCall { pub name: String, pub arguments: serde_json::Value, }
 
+pub struct ModelMetadata {
+    pub name: String,
+    pub context_window: usize,
+}
+
 /// A provider bridging an external AI model into the MindPalace ecosystem.
 #[async_trait]
 pub trait ModelProvider: LlmClient + Send + Sync {
+    /// Discovers metadata about the model (e.g. context window) from the provider API.
+    async fn discover_metadata(&self) -> ModelMetadata {
+        ModelMetadata {
+            name: "unknown".to_string(),
+            context_window: 2048,
+        }
+    }
     /// Non-streaming completion.
     async fn complete(&self, req: Request) -> anyhow::Result<Response>;
     /// Streaming completion returning a boxed stream of chunks.
@@ -577,6 +589,7 @@ impl ModelProvider for OllamaProvider {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
         use ollama_rs::generation::chat::request::ChatMessageRequest;
         use ollama_rs::generation::chat::ChatMessage;
+        use ollama_rs::generation::options::GenerationOptions;
 
         let mut messages = Vec::new();
         for item in req.context.items.iter() {
@@ -591,7 +604,11 @@ impl ModelProvider for OllamaProvider {
 
         messages.push(ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, req.prompt));
 
-        let chat_req = ChatMessageRequest::new(self.model.clone(), messages);
+        let mut chat_req = ChatMessageRequest::new(self.model.clone(), messages);
+        if let Some(ctx) = self.num_ctx {
+            chat_req = chat_req.options(GenerationOptions::default().num_ctx(ctx.into()));
+        }
+        
         let res = self.client.send_chat_messages(chat_req).await?;
         
         let content = res.message.content;
@@ -608,6 +625,7 @@ impl ModelProvider for OllamaProvider {
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         use ollama_rs::generation::chat::request::ChatMessageRequest;
         use ollama_rs::generation::chat::ChatMessage;
+        use ollama_rs::generation::options::GenerationOptions;
 
         let mut messages = Vec::new();
         for item in req.context.items.iter() {
@@ -620,7 +638,11 @@ impl ModelProvider for OllamaProvider {
         }
         messages.push(ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, req.prompt));
 
-        let chat_req = ChatMessageRequest::new(self.model.clone(), messages);
+        let mut chat_req = ChatMessageRequest::new(self.model.clone(), messages);
+        if let Some(ctx) = self.num_ctx {
+            chat_req = chat_req.options(GenerationOptions::default().num_ctx(ctx.into()));
+        }
+
         let mut stream = self.client.send_chat_messages_stream(chat_req).await?;
         
         let stream = async_stream::try_stream! {
@@ -637,6 +659,46 @@ impl ModelProvider for OllamaProvider {
             }
         };
         Ok(Box::pin(stream))
+    }
+
+    async fn discover_metadata(&self) -> ModelMetadata {
+        let context_window = if let Some(ctx) = self.num_ctx {
+            ctx as usize
+        } else {
+            // Attempt to query Ollama for the actual model context window
+            match self.client.list_local_models().await {
+                Ok(models) => {
+                    models.into_iter()
+                        .find(|m| m.name == self.model || m.name.starts_with(&self.model))
+                        .map(|m| {
+                            // HEURISTIC: Many Qwen/Llama models in Ollama default to 2k or 4k 
+                            // unless specified. However, ollama-rs LocalModel doesn't expose 
+                            // the context window directly in the list.
+                            // We return a safe 2048 default if we can't be sure, 
+                            // but for qwen2.5-coder specifically, it's 32k.
+                            if m.name.contains("qwen2.5-coder") { 32768 }
+                            else if m.name.contains("llama3.2") { 131072 }
+                            else { 2048 }
+                        }).unwrap_or(2048)
+                }
+                Err(_) => 2048,
+            }
+        };
+
+        ModelMetadata {
+            name: self.model.clone(),
+            context_window,
+        }
+    }
+}
+
+impl OllamaProvider {
+    /// Attempts to discover model metadata (like context window) directly from Ollama.
+    pub async fn get_model_info(&self) -> anyhow::Result<ollama_rs::models::LocalModel> {
+        let models = self.client.list_local_models().await?;
+        models.into_iter()
+            .find(|m| m.name == self.model || m.name.starts_with(&self.model))
+            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in Ollama inventory", self.model))
     }
 }
 
