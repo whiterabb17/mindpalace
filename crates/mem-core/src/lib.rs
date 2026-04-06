@@ -537,6 +537,8 @@ pub trait ModelProvider: LlmClient + Send + Sync {
             context_window: 2048,
         }
     }
+    /// Dynamically updates the context window size for subsequent calls.
+    fn set_context_window(&self, _size: usize) {}
     /// Non-streaming completion.
     async fn complete(&self, req: Request) -> anyhow::Result<Response>;
     /// Streaming completion returning a boxed stream of chunks.
@@ -548,7 +550,7 @@ pub struct OllamaProvider {
     pub client: ollama_rs::Ollama,
     pub model: String,
     pub embedding_model: String,
-    pub num_ctx: Option<u32>,
+    pub num_ctx: std::sync::atomic::AtomicU32,
 }
 
 impl OllamaProvider {
@@ -566,7 +568,7 @@ impl OllamaProvider {
             client: ollama_rs::Ollama::new(base, port),
             model,
             embedding_model,
-            num_ctx,
+            num_ctx: std::sync::atomic::AtomicU32::new(num_ctx.unwrap_or(0)),
         }
     }
 }
@@ -576,7 +578,8 @@ impl LlmClient for OllamaProvider {
     async fn completion(&self, prompt: &str) -> anyhow::Result<String> {
         use ollama_rs::generation::completion::request::GenerationRequest;
         let mut gen_req = GenerationRequest::new(self.model.clone(), prompt.to_string());
-        if let Some(ctx) = self.num_ctx {
+        let ctx = self.num_ctx.load(std::sync::atomic::Ordering::SeqCst);
+        if ctx > 0 {
             gen_req = gen_req.options(ollama_rs::generation::options::GenerationOptions::default().num_ctx(ctx.into()));
         }
         let res = self.client.generate(gen_req).await?;
@@ -605,7 +608,8 @@ impl ModelProvider for OllamaProvider {
         messages.push(ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, req.prompt));
 
         let mut chat_req = ChatMessageRequest::new(self.model.clone(), messages);
-        if let Some(ctx) = self.num_ctx {
+        let ctx = self.num_ctx.load(std::sync::atomic::Ordering::SeqCst);
+        if ctx > 0 { // Safety: never send 0 to Ollama, as it causes hallucinated garbage
             chat_req = chat_req.options(GenerationOptions::default().num_ctx(ctx.into()));
         }
         
@@ -639,7 +643,8 @@ impl ModelProvider for OllamaProvider {
         messages.push(ChatMessage::new(ollama_rs::generation::chat::MessageRole::User, req.prompt));
 
         let mut chat_req = ChatMessageRequest::new(self.model.clone(), messages);
-        if let Some(ctx) = self.num_ctx {
+        let ctx = self.num_ctx.load(std::sync::atomic::Ordering::SeqCst);
+        if ctx > 0 { // Safety: never send 0 to Ollama
             chat_req = chat_req.options(GenerationOptions::default().num_ctx(ctx.into()));
         }
 
@@ -662,7 +667,8 @@ impl ModelProvider for OllamaProvider {
     }
 
     async fn discover_metadata(&self) -> ModelMetadata {
-        let context_window = if let Some(ctx) = self.num_ctx {
+        let ctx = self.num_ctx.load(std::sync::atomic::Ordering::SeqCst);
+        let context_window = if ctx > 0 {
             ctx as usize
         } else {
             // Attempt to query Ollama for the actual model context window
@@ -674,10 +680,10 @@ impl ModelProvider for OllamaProvider {
                             // HEURISTIC: Many Qwen/Llama models in Ollama default to 2k or 4k 
                             // unless specified. However, ollama-rs LocalModel doesn't expose 
                             // the context window directly in the list.
-                            // We return a safe 2048 default if we can't be sure, 
-                            // but for qwen2.5-coder specifically, it's 32k.
                             if m.name.contains("qwen2.5-coder") { 32768 }
                             else if m.name.contains("llama3.2") { 131072 }
+                            else if m.name.contains("llama3.1") { 131072 }
+                            else if m.name.contains("mistral") { 32768 }
                             else { 2048 }
                         }).unwrap_or(2048)
                 }
@@ -689,6 +695,10 @@ impl ModelProvider for OllamaProvider {
             name: self.model.clone(),
             context_window,
         }
+    }
+
+    fn set_context_window(&self, size: usize) {
+        self.num_ctx.store(size as u32, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
