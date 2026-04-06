@@ -1,44 +1,62 @@
-# mem-core (v0.2.0)
+# mem-core: Foundation & Shared Abstractions
 
-The foundation of the MindPalace memory ecosystem. This crate defines the core data models, traits, and storage interfaces used by all other memory layers.
+![Rust](https://img.shields.io/badge/language-Rust-orange.svg) ![Status: Foundation](https://img.shields.io/badge/Status-Foundational-blue.svg)
 
-## Key Components
+`mem-core` is the foundational crate for the **MindPalace** ecosystem. It defines the core data structures, shared traits, and relational modeling primitives used across all memory layers.
+
+## 🗝️ Key Features
+
+- **Relational Knowledge Graph**: Built on top of `ruvector-graph`, providing `FactNode` and `FactGraph` for structured memory.
+- **Hierarchical Scoping**: Categorize knowledge as `Private` (session), `Project` (team), or `Global` (world-wide technical facts).
+- **Short-Term Context**: Robust `Context` and `MemoryItem` structures for managing conversation history.
+- **Foundational Traits**:
+  - `MemoryLayer`: Standard interface for all context transformation logic.
+  - `StorageBackend`: Abstract persistent storage (File, S3, Redis).
+  - `ModelProvider`: Generic bridging for LLM (Ollama, Anthropic, etc.) and Embedding providers.
+- **Security-First Persistence**: Includes `EncryptedStorageBackend` with transparent **AES-256-GCM** encryption.
+- **Observability**: Built-in Prometheus metrics for tracking system health and performance.
+
+## 🏗️ Core Structures
 
 ### `FactNode`
-A structured representation of a single unit of knowledge.
-- **Relational Metadata**: Supports `superseded_by` and `dependencies` fields for graph modeling.
-- **Semantic Metadata**: Optional `embedding` field for vector search integration.
-- **Provenance**: Tracks source session IDs and timestamps.
+A discrete unit of knowledge with confidence scores, versioning, and semantic embeddings.
+```rust
+pub struct FactNode {
+    pub id: String,
+    pub content: String,
+    pub confidence: f32,
+    pub scope: FactScope, // Private, Project, Global
+    pub timestamp: u64,
+}
+```
 
-### `FactGraph`
-An operational handle for **RuVector-Graph** (`GraphDB`).
-- **Persistence**: Manages vertex and edge creation for relational fact storage.
-- **Querying**: Provides abstractions for fetching non-superseded facts and navigating dependency chains.
+### `Context`
+The agent's active workspace, consisting of a sequence of `MemoryItem` objects.
+```rust
+pub struct Context {
+    pub items: Vec<MemoryItem>,
+}
+```
 
-### `KnowledgeBase`
-The top-level container that encapsulates the `FactGraph`.
-
-### `StorageBackend`
-A trait for pluggable persistence (e.g., `FileStorage`).
-
-### Middleware Traits
-- `MemoryLayer`: Standard interface for all pipeline stages.
-- `ModelProvider`: Interface for LLM completions and streaming.
-- `TokenCounter`: Standard for token management.
-- `EmbeddingProvider`: Standard for vector generation.
-
-## Relational Schema (GraphDB)
-
-Nodes are labeled as `:Fact` and contain properties matching the `FactNode` struct. Relationships include:
-- `[:SUPERSEDED_BY]`: Points from an old fact to its replacement.
-- `[:DEPENDS_ON]`: Indicates a logical dependency between facts.
-
-## Usage
+## 🛠️ Usage Example: Encrypted Storage
 
 ```rust
-use mem_core::{FactNode, FactGraph};
+use mem_core::{FileStorage, EncryptedStorageBackend, StorageBackend};
+use std::path::PathBuf;
 
-let graph = FactGraph::new(Some("./storage/graph.db".into()))?;
-let fact = FactNode::new("User prefers dark mode".into(), "Preferences".into(), 1.0, "session_001".into());
-graph.add_fact(fact)?;
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let raw_storage = FileStorage::new(PathBuf::from("./data"));
+    let key = [0u8; 32]; // Use a secure key in production!
+    
+    let secure_storage = EncryptedStorageBackend::new(raw_storage, key);
+    
+    // Transparently encrypts data before saving to disk
+    secure_storage.store("secrets/key.json", b"sensitive data").await?;
+    
+    Ok(())
+}
 ```
+
+## 📂 Architecture Context
+`mem-core` is the bottom-most dependency in the MindPalace DAG. All other crates (`mem-*`, `brain`) depend on `mem-core` for shared types, ensuring a strictly acyclic and modular architecture.
