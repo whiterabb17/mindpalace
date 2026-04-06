@@ -540,9 +540,13 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    pub fn new(model: String, embedding_model: String, num_ctx: Option<u32>) -> Self {
+    pub fn new(base_url: String, model: String, embedding_model: String, num_ctx: Option<u32>) -> Self {
+        let url = reqwest::Url::parse(&base_url).unwrap_or_else(|_| reqwest::Url::parse("http://localhost:11434").unwrap());
+        let host = url.host_str().unwrap_or("localhost").to_string();
+        let port = url.port().unwrap_or(11434);
+        
         Self {
-            client: ollama_rs::Ollama::default(),
+            client: ollama_rs::Ollama::new(host, port),
             model,
             embedding_model,
             num_ctx,
