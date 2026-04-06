@@ -81,18 +81,22 @@ pub struct RuVectorStore {
     pub dim: usize,
     /// Distance metric (e.g., Cosine, Euclidean) for semantic search.
     pub metric: DistanceMetric,
+    /// Maximum capacity of the HNSW index.
+    pub max_elements: usize,
 }
 
 impl RuVectorStore {
     /// Initializes a new RuVectorStore with the specified dimension and metric.
     pub fn new(dim: usize, metric: DistanceMetric, graph: Arc<FactGraph>) -> Self {
-        let config = HnswConfig::default();
+        let mut config = HnswConfig::default();
+        config.max_elements = 100_000;
         Self {
             index: RwLock::new(HnswIndex::new(dim, metric, config).expect("Failed to initialize HnswIndex")),
             graph,
             metadata: RwLock::new(HashMap::new()),
             dim,
             metric,
+            max_elements: 100_000,
         }
     }
 }
@@ -155,7 +159,9 @@ impl VectorStore for RuVectorStore {
         let mut metadata = self.metadata.write().await;
         metadata.clear();
         let mut index = self.index.write().await;
-        *index = HnswIndex::new(self.dim, self.metric, HnswConfig::default()).expect("Failed to reset HnswIndex");
+        let mut config = HnswConfig::default();
+        config.max_elements = self.max_elements;
+        *index = HnswIndex::new(self.dim, self.metric, config).expect("Failed to reset HnswIndex");
         Ok(())
     }
 }
