@@ -7,6 +7,14 @@ use prometheus::{Histogram, Gauge, Registry, opts, register_histogram_with_regis
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use ruvector_graph::{GraphDB, Node, Edge, Label, Properties, PropertyValue};
+use once_cell::sync::Lazy;
+use tiktoken_rs::CoreBPE;
+
+/// Global tokenizer to prevent 1.5GB+ allocation spikes and Windows fast-fail crashes.
+/// We use cl100k_base (GPT-4 standard) which is ~10x leaner than o200k_base.
+pub static STATIC_TOKENIZER: Lazy<CoreBPE> = Lazy::new(|| {
+    tiktoken_rs::cl100k_base().expect("Failed to initialize mission-critical cl100k_base tokenizer")
+});
 
 /// Represents the role of a participant in a conversation or memory event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1622,9 +1630,15 @@ impl EmbeddingProvider for GeminiProvider {
 }
 
 impl TokenCounter for GeminiProvider { fn count_tokens(&self, text: &str) -> usize { (text.len() / 4).max(1) } }
-impl TokenCounter for OllamaProvider { fn count_tokens(&self, text: &str) -> usize { tiktoken_rs::cl100k_base().unwrap().encode_with_special_tokens(text).len() } }
+impl TokenCounter for OllamaProvider { fn count_tokens(&self, text: &str) -> usize { STATIC_TOKENIZER.encode_with_special_tokens(text).len() } }
 impl TokenCounter for AnthropicProvider { fn count_tokens(&self, text: &str) -> usize { (text.len() / 3).max(1) } }
-impl TokenCounter for OpenAiProvider { fn count_tokens(&self, text: &str) -> usize { let bpe = tiktoken_rs::get_bpe_from_model(&self.model).unwrap_or_else(|_| tiktoken_rs::cl100k_base().unwrap()); bpe.encode_with_special_tokens(text).len() } }
+impl TokenCounter for OpenAiProvider { 
+    fn count_tokens(&self, text: &str) -> usize { 
+        // For OpenAI, we fall back to the global cl100k_base for stability,
+        // rather than attempting to load per-model BPEs which may cause memory spikes.
+        STATIC_TOKENIZER.encode_with_special_tokens(text).len()
+    } 
+}
 
 /// Scoring interface for determining how relevant a memory item is to the current conversation.
 #[async_trait]
