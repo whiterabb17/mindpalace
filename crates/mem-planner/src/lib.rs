@@ -30,12 +30,14 @@ pub struct TaskNode {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecutionPlan {
     pub tasks: HashMap<TaskId, TaskNode>,
+    pub content: String,
 }
 
 impl ExecutionPlan {
     pub fn new() -> Self {
         Self {
             tasks: HashMap::new(),
+            content: String::new(),
         }
     }
 
@@ -128,9 +130,18 @@ JSON OUTPUT:
             &response
         };
 
-        let plan: ExecutionPlan = serde_json::from_str(json_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse execution plan: {}. Raw: {}", e, response))?;
-
-        Ok(plan)
+        match serde_json::from_str::<ExecutionPlan>(json_str) {
+            Ok(mut plan) => {
+                plan.content = response;
+                Ok(plan)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse execution plan JSON: {}. Using raw content for fallback.", e);
+                Ok(ExecutionPlan {
+                    tasks: HashMap::new(),
+                    content: response,
+                })
+            }
+        }
     }
 }
