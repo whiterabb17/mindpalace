@@ -989,33 +989,52 @@ impl ModelProvider for OllamaProvider {
 
         let stream = async_stream::try_stream! {
             let mut it = stream;
-            while let Some(chunk_res) = it.next().await {
+            // Use a labeled loop so we can break out of both levels when done=true.
+            'outer: while let Some(chunk_res) = it.next().await {
                 let bytes = chunk_res.map_err(|e| anyhow::anyhow!("Stream error: {}", e))?;
                 let text = String::from_utf8_lossy(&bytes);
                 for line in text.lines() {
                     if line.trim().is_empty() { continue; }
-                    let chunk: serde_json::Value = serde_json::from_str(line).map_err(|e| anyhow::anyhow!("JSON error: {}", e))?;
+                    let chunk: serde_json::Value = serde_json::from_str(line)
+                        .map_err(|e| anyhow::anyhow!("JSON error: {}", e))?;
 
+                    let is_done = chunk["done"].as_bool().unwrap_or(false);
                     let content_delta = chunk["message"]["content"].as_str().map(|s| s.to_string());
-                    let mut tool_call_delta = None;
 
+                    // When the model requests tool calls, emit one ResponseChunk per call so
+                    // the agent loop can capture ALL of them, not just the first one.
+                    // Ollama places all tool calls in a single JSON line (usually the done=true
+                    // chunk), so we iterate here and set is_final only on the last entry.
                     if let Some(calls) = chunk["message"]["tool_calls"].as_array() {
                         if !calls.is_empty() {
-                            let call = &calls[0];
-                            tool_call_delta = Some(ToolCallDelta {
-                                name: call["function"]["name"].as_str().map(|s| s.to_string()),
-                                arguments_delta: Some(call["function"]["arguments"].to_string()),
-                            });
+                            let num_calls = calls.len();
+                            for (i, call) in calls.iter().enumerate() {
+                                let is_last = i == num_calls - 1;
+                                yield ResponseChunk {
+                                    // Attach content_delta (usually empty) only to the first chunk
+                                    // to avoid duplicating any preamble text.
+                                    content_delta: if i == 0 { content_delta.clone() } else { None },
+                                    tool_call_delta: Some(ToolCallDelta {
+                                        name: call["function"]["name"].as_str().map(|s| s.to_string()),
+                                        arguments_delta: Some(call["function"]["arguments"].to_string()),
+                                    }),
+                                    usage: None,
+                                    is_final: is_done && is_last,
+                                };
+                            }
+                            if is_done { break 'outer; }
+                            continue; // Skip the normal content yield below
                         }
                     }
 
+                    // Normal path: content-only streaming chunk.
                     yield ResponseChunk {
                         content_delta,
-                        tool_call_delta,
+                        tool_call_delta: None,
                         usage: None,
-                        is_final: chunk["done"].as_bool().unwrap_or(false)
+                        is_final: is_done,
                     };
-                    if chunk["done"].as_bool().unwrap_or(false) { break; }
+                    if is_done { break 'outer; }
                 }
             }
         };
