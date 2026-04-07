@@ -23,8 +23,7 @@ chrono.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
 futures-util.workspace = true
 async-stream = "0.3"
-# tiktoken-rs removed to prevent Windows memory crashes
-# tiktoken-rs.workspace = true
+tiktoken-rs.workspace = true
 ruvector-graph.workspace = true
 regex.workspace = true
 once_cell.workspace = true

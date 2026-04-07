@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use mem_core::{Context, LlmClient};
+use mem_core::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -22,7 +22,9 @@ pub struct TaskNode {
     pub description: String,
     pub tool_name: Option<String>,
     pub tool_args: Option<serde_json::Value>,
+    #[serde(default)]
     pub dependencies: Vec<TaskId>,
+    #[serde(default)]
     pub metadata: serde_json::Value,
 }
 
@@ -30,7 +32,12 @@ pub struct TaskNode {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecutionPlan {
     pub tasks: HashMap<TaskId, TaskNode>,
+    #[serde(default)]
     pub content: String,
+    #[serde(default)]
+    pub requires_approval: bool,
+    #[serde(skip)]
+    pub usage: Option<mem_core::ResponseUsage>,
 }
 
 impl ExecutionPlan {
@@ -38,6 +45,8 @@ impl ExecutionPlan {
         Self {
             tasks: HashMap::new(),
             content: String::new(),
+            requires_approval: false,
+            usage: None,
         }
     }
 
@@ -51,30 +60,34 @@ impl ExecutionPlan {
 /// The core planning engine that transforms high-level goals into execution graphs.
 #[async_trait]
 pub trait PlannerEngine: Send + Sync {
-    /// Generates a structured execution plan based on the current context and goal.
-    async fn plan(&self, goal: &str, context: &Context, todo_state: Option<&str>) -> anyhow::Result<ExecutionPlan>;
+    /// Generates a structured execution plan based on the current context, goal, and available tools.
+    async fn plan(&self, goal: &str, context: &Context, tools: Vec<mem_core::ToolDefinition>, todo_state: Option<&str>) -> anyhow::Result<ExecutionPlan>;
 }
 
 /// A production-grade LLM-driven planner.
 pub struct LlmPlanner {
-    client: std::sync::Arc<dyn LlmClient>,
+    client: std::sync::Arc<dyn mem_core::ModelProvider>,
 }
 
 impl LlmPlanner {
-    pub fn new(client: std::sync::Arc<dyn LlmClient>) -> Self {
+    pub fn new(client: std::sync::Arc<dyn mem_core::ModelProvider>) -> Self {
         Self { client }
     }
 }
 
 #[async_trait]
 impl PlannerEngine for LlmPlanner {
-    async fn plan(&self, goal: &str, context: &Context, todo_state: Option<&str>) -> anyhow::Result<ExecutionPlan> {
+    async fn plan(&self, goal: &str, context: &Context, tools: Vec<mem_core::ToolDefinition>, todo_state: Option<&str>) -> anyhow::Result<ExecutionPlan> {
         let context_json = serde_json::to_string_pretty(context)?;
         let todo_info = todo_state.unwrap_or("No current TODO state.");
+        let tools_json = serde_json::to_string_pretty(&tools)?;
 
         let prompt = format!(
             r#"You are the Planning Module of a Cognitive Agent. 
 Your goal is to decompose a high-level objective into a Directed Acyclic Graph (DAG) of discrete tasks.
+
+### AVAILABLE TOOLS ###
+{}
 
 ### OBJECTIVE ###
 {}
@@ -87,61 +100,135 @@ Your goal is to decompose a high-level objective into a Directed Acyclic Graph (
 
 ### OUTPUT FORMAT ###
 You must output a JSON object representing the ExecutionPlan.
-Each task must have a unique ID, a name, a description, and a list of dependency IDs.
-Crucially, if a task requires a tool, specify "tool_name" and "tool_args".
+If the objective is just a greeting or conversational prompt that doesn't need tools, return an empty "tasks" object and put your response in the "content" field.
 
 Example:
 {{
+  "content": "Hello! How can I help you today?",
+  "tasks": {{}}
+}}
+
+If the objective requires action:
+{{
+  "content": "I'll start by reading the main file to understand the logic.",
+  "requires_approval": false,
   "tasks": {{
     "task_1": {{
       "id": "task_1",
-      "name": "Analyze structure",
+      "name": "Read main.rs",
       "description": "Read the main.rs file",
       "tool_name": "read_file",
       "tool_args": {{ "path": "src/main.rs" }},
-      "dependencies": []
-    }},
-    "task_2": {{
-      "id": "task_2",
-      "name": "Update Logic",
-      "description": "Apply the changes",
-      "tool_name": "write_file",
-      "tool_args": {{ "path": "src/main.rs", "content": "..." }},
-      "dependencies": ["task_1"]
+      "dependencies": [],
+      "metadata": {{}}
     }}
   }}
 }}
 
+If the objective is complex or high-risk (e.g. data deletion, multi-step sequence):
+Set "requires_approval": true.
+
 JSON OUTPUT:
 "#,
-            goal, todo_info, context_json
+            tools_json, goal, todo_info, context_json
         );
 
-        let response = self.client.completion(&prompt).await?;
+        let req = mem_core::Request {
+            prompt,
+            context: std::sync::Arc::new(context.clone()),
+            tools,
+        };
+        let response = self.client.complete(req).await?;
+        let usage = response.usage.clone();
+        let content = response.content;
         
+        // --- PROMPT ECHO STRIPPING ---
+        // Some small models repeat the prompt. We strip everything up to the first JSON brace.
+        let mut clean_response = content.trim();
+        if let Some(start_brace) = clean_response.find('{') {
+            // Check if we have a preamble that looks like an echo
+            let preamble = &clean_response[..start_brace];
+            if preamble.contains("GOAL:") || preamble.contains("User:") || preamble.len() > 100 {
+                tracing::info!("Detected and stripped potential prompt echo of length {}", preamble.len());
+                clean_response = &clean_response[start_brace..];
+            }
+        }
+
         // Extract JSON from response (handling potential markdown fences)
-        let json_str = if let Some(start) = response.find('{') {
-            if let Some(end) = response.rfind('}') {
-                &response[start..=end]
+        let json_str = if let Some(start) = clean_response.find('{') {
+            if let Some(end) = clean_response.rfind('}') {
+                &clean_response[start..=end]
             } else {
-                &response[start..]
+                &clean_response[start..]
             }
         } else {
-            &response
+            clean_response
         };
 
         match serde_json::from_str::<ExecutionPlan>(json_str) {
             Ok(mut plan) => {
-                plan.content = response;
+                plan.usage = usage;
+                // If content is still the full raw response, clean it up
+                if plan.content.is_empty() || plan.content == content {
+                    plan.content = "I have planned the next steps.".into(); 
+                }
+                tracing::info!(tasks_count = plan.tasks.len(), "Execution plan parsed successfully");
                 Ok(plan)
             }
             Err(e) => {
-                tracing::warn!("Failed to parse execution plan JSON: {}. Using raw content for fallback.", e);
-                Ok(ExecutionPlan {
-                    tasks: HashMap::new(),
-                    content: response,
-                })
+                tracing::warn!("Failed to parse execution plan JSON: {}. Attempting fallback recovery.", e);
+                // Fallback: If it's not JSON, only use it as content if it's NOT an echo
+                if content.contains(&goal[..goal.len().min(20)]) {
+                     Ok(ExecutionPlan {
+                        tasks: std::collections::HashMap::new(),
+                        content: "I'm sorry, I encountered an error parsing the plan. Please try again.".into(),
+                        requires_approval: false,
+                        usage,
+                    })
+                } else {
+                    Ok(ExecutionPlan {
+                        tasks: std::collections::HashMap::new(),
+                        content: content.to_string(),
+                        requires_approval: false,
+                        usage,
+                    })
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_node_deserialization_no_metadata() {
+        let json = r#"{
+            "id": "task_1",
+            "name": "Test Task",
+            "description": "A test task",
+            "dependencies": []
+        }"#;
+        let node: TaskNode = serde_json::from_str::<TaskNode>(json).unwrap();
+        assert_eq!(node.name, "Test Task");
+        assert_eq!(node.metadata, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_execution_plan_deserialization_no_content() {
+        let json = r#"{
+            "tasks": {
+                "task_1": {
+                    "id": "task_1",
+                    "name": "Test Task",
+                    "description": "A test task",
+                    "dependencies": []
+                }
+            }
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str::<ExecutionPlan>(json).unwrap();
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.content, "");
     }
 }
