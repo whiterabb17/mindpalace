@@ -34,6 +34,10 @@ moka = { version = "0.12.15", features = ["future"] }
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 
+[[bin]]
+name = "verify_ollama"
+path = "src/verify_ollama.rs"
+
 [[bench]]
 name = "analyzer_benchmarks"
 harness = false
