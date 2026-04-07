@@ -14,6 +14,12 @@ impl TaskId {
     }
 }
 
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A single unit of work in the agent's plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskNode {
@@ -86,7 +92,10 @@ impl PlannerEngine for LlmPlanner {
             r#"You are the Planning Module of a Cognitive Agent. 
 Your goal is to decompose a high-level objective into a Directed Acyclic Graph (DAG) of discrete tasks.
 
-### AVAILABLE TOOLS ###
+### AVAILABLE TOOLS & SKILLS ###
+- **Tools**: These are executable functions (e.g. filesystem, search).
+- **Skills**: These are specialized instructional tools (prefixed with 'skill:'). If a task falls into a skill's domain, you SHOULD call the skill first to retrieve its instructions.
+
 {}
 
 ### OBJECTIVE ###
@@ -98,9 +107,10 @@ Your goal is to decompose a high-level objective into a Directed Acyclic Graph (
 ### CONTEXT ###
 {}
 
-### OUTPUT FORMAT ###
-You must output a JSON object representing the ExecutionPlan.
-If the objective is just a greeting or conversational prompt that doesn't need tools, return an empty "tasks" object and put your response in the "content" field.
+### INSTRUCTIONS ###
+1. Decompose the goal into steps.
+2. If a skill matches the domain (e.g. 'rust_expert' for a Rust task), prioritize calling it to get the roadmap.
+3. Output the plan as JSON.
 
 Example:
 {{

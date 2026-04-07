@@ -638,6 +638,7 @@ pub struct ResponseUsage {
 pub struct ToolCallDelta {
     pub name: Option<String>,
     pub arguments_delta: Option<String>,
+    pub id: Option<String>,
 }
 /// Metadata for discovering available tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -652,6 +653,7 @@ pub struct ToolDefinition {
 pub struct ToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
+    pub id: String,
 }
 
 pub struct ModelMetadata {
@@ -872,6 +874,7 @@ impl ModelProvider for OllamaProvider {
                     tool_calls.push(ToolCall {
                         name: name.to_string(),
                         arguments: serde_json::Value::Object(args.clone()),
+                        id: uuid::Uuid::new_v4().to_string(),
                     });
                 }
             }
@@ -888,6 +891,7 @@ impl ModelProvider for OllamaProvider {
                             tool_calls.push(ToolCall {
                                 name: name.to_string(),
                                 arguments: serde_json::Value::Object(args.clone()),
+                                id: uuid::Uuid::new_v4().to_string(),
                             });
                         }
                     }
@@ -905,6 +909,7 @@ impl ModelProvider for OllamaProvider {
                                 tool_calls.push(ToolCall {
                                     name: name.to_string(),
                                     arguments: serde_json::Value::Object(args.clone()),
+                                    id: uuid::Uuid::new_v4().to_string(),
                                 });
                             }
                         }
@@ -918,6 +923,7 @@ impl ModelProvider for OllamaProvider {
                                 tool_calls.push(ToolCall {
                                     name: name.to_string(),
                                     arguments: serde_json::Value::Object(args.clone()),
+                                    id: uuid::Uuid::new_v4().to_string(),
                                 });
                             }
                         }
@@ -932,6 +938,7 @@ impl ModelProvider for OllamaProvider {
                         tool_calls.push(ToolCall {
                             name: name.to_string(),
                             arguments: serde_json::Value::Object(args.clone()),
+                            id: uuid::Uuid::new_v4().to_string(),
                         });
                     }
                 }
@@ -1060,6 +1067,7 @@ impl ModelProvider for OllamaProvider {
                                     tool_call_delta: Some(ToolCallDelta {
                                         name: call["function"]["name"].as_str().map(|s| s.to_string()),
                                         arguments_delta: Some(call["function"]["arguments"].to_string()),
+                                        id: call["id"].as_str().map(|s| s.to_string()),
                                     }),
                                     usage: if is_last { usage.clone() } else { None },
                                     is_final: is_done && is_last,
@@ -1296,10 +1304,11 @@ impl ModelProvider for AnthropicProvider {
         for item in data.content {
             match item {
                 AnthropicContent::Text { text } => content.push_str(&text),
-                AnthropicContent::ToolUse { name, input, .. } => {
+                AnthropicContent::ToolUse { id, name, input } => {
                     tool_calls.push(ToolCall {
                         name,
                         arguments: input,
+                        id,
                     });
                 }
             }
@@ -1378,10 +1387,10 @@ impl ModelProvider for AnthropicProvider {
                         if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                             match event {
                                 AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
-                                    if let AnthropicContent::ToolUse { name, .. } = content_block {
+                                    if let AnthropicContent::ToolUse { id, name, .. } = content_block {
                                         yield ResponseChunk {
                                             content_delta: None,
-                                            tool_call_delta: Some(ToolCallDelta { name: Some(name), arguments_delta: None }),
+                                            tool_call_delta: Some(ToolCallDelta { name: Some(name), arguments_delta: None, id: Some(id) }),
                                             usage: None,
                                             is_final: false
                                         };
@@ -1395,7 +1404,7 @@ impl ModelProvider for AnthropicProvider {
                                         AnthropicDelta::InputJsonDelta { partial_json } => {
                                             yield ResponseChunk {
                                                 content_delta: None,
-                                                tool_call_delta: Some(ToolCallDelta { name: None, arguments_delta: Some(partial_json) }),
+                                                tool_call_delta: Some(ToolCallDelta { name: None, arguments_delta: Some(partial_json), id: None }),
                                                 usage: None,
                                                 is_final: false
                                             };
@@ -1678,6 +1687,7 @@ impl ModelProvider for OpenAiProvider {
                         tool_calls.push(ToolCall {
                             name: tc.function.name.clone(),
                             arguments: args,
+                            id: tc.id.clone(),
                         });
                     }
                 }
@@ -1799,6 +1809,7 @@ impl ModelProvider for OpenAiProvider {
                                         let tool_call_delta = Some(ToolCallDelta {
                                             name: tc.function.as_ref().and_then(|f| f.name.clone()),
                                             arguments_delta: tc.function.as_ref().and_then(|f| f.arguments.clone()),
+                                            id: tc.id.clone(),
                                         });
                                         yield ResponseChunk {
                                             content_delta: None,
@@ -2052,6 +2063,7 @@ impl ModelProvider for GeminiProvider {
                     tool_calls.push(ToolCall {
                         name: fc.name.clone(),
                         arguments: fc.args.clone(),
+                        id: uuid::Uuid::new_v4().to_string(),
                     });
                 }
             }
@@ -2143,6 +2155,7 @@ impl ModelProvider for GeminiProvider {
                                     tool_call_delta = Some(ToolCallDelta {
                                         name: Some(fc.name.clone()),
                                         arguments_delta: Some(serde_json::to_string(&fc.args).unwrap_or_else(|_| "{}".into())),
+                                        id: Some(uuid::Uuid::new_v4().to_string()),
                                     });
                                 }
 
