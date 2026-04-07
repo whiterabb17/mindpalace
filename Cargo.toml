@@ -15,10 +15,11 @@ members = [
     "crates/mem-resilience",
     "crates/mem-broker",
     "crates/mem-personality",
+    "crates/mem-planner",
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.8"
 edition = "2021"
 authors = ["MindPalace Authors"]
 license = "MIT"
