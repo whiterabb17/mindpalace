@@ -108,9 +108,11 @@ Your goal is to decompose a high-level objective into a Directed Acyclic Graph (
 {}
 
 ### INSTRUCTIONS ###
-1. Decompose the goal into steps.
-2. If a skill matches the domain (e.g. 'rust_expert' for a Rust task), prioritize calling it to get the roadmap.
-3. Output the plan as JSON.
+1. CHECK FOR COMPLETION: Read the CONTEXT carefully. If the user's objective is ALREADY fully satisfied by the previous information or task results, DO NOT generate any tasks.
+2. If satisfied, provide a natural language summary in the "content" field and leave "tasks" empty.
+3. If tasks are needed, decompose the goal into minimal necessary steps.
+4. If a skill matches the domain (e.g. 'rust_expert' for a Rust task), prioritize calling it to get the roadmap.
+5. Output the plan as JSON.
 
 Example:
 {{
@@ -180,7 +182,11 @@ JSON OUTPUT:
                 plan.usage = usage;
                 // If content is still the full raw response, clean it up
                 if plan.content.is_empty() || plan.content == content {
-                    plan.content = "I have planned the next steps.".into(); 
+                    if plan.tasks.is_empty() {
+                        plan.content = "I have reviewed the state and the goal is achieved. No further tasks are required.".into();
+                    } else {
+                        plan.content = "I have planned the next steps to achieve the goal.".into(); 
+                    }
                 }
                 tracing::info!(tasks_count = plan.tasks.len(), "Execution plan parsed successfully");
                 Ok(plan)
