@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+pub const PLAN_BOILERPLATE_TASKS: &str = "I have planned the next steps to achieve the goal.";
+pub const PLAN_BOILERPLATE_NO_TASKS: &str = "I have reviewed the state and the goal is achieved. No further tasks are required.";
+
 /// Unique identifier for a task in the execution graph.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TaskId(pub String);
@@ -37,6 +40,7 @@ pub struct TaskNode {
 /// A Directed Acyclic Graph (DAG) of tasks representing the agent's plan.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecutionPlan {
+    #[serde(deserialize_with = "deserialize_tasks")]
     pub tasks: HashMap<TaskId, TaskNode>,
     #[serde(default)]
     pub content: String,
@@ -44,6 +48,54 @@ pub struct ExecutionPlan {
     pub requires_approval: bool,
     #[serde(skip)]
     pub usage: Option<mem_core::ResponseUsage>,
+}
+
+fn deserialize_tasks<'de, D>(deserializer: D) -> Result<HashMap<TaskId, TaskNode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TasksFormat {
+        Map(HashMap<String, TaskNode>),
+        List(Vec<TaskNode>),
+        ListMap(Vec<HashMap<String, TaskNode>>),
+    }
+
+    let format = TasksFormat::deserialize(deserializer)?;
+    let mut map = HashMap::new();
+
+    match format {
+        TasksFormat::Map(m) => {
+            for (k, mut v) in m {
+                // Ensure ID consistency
+                if v.id.0.is_empty() || v.id.0 == "pending" {
+                    v.id = TaskId(k.clone());
+                }
+                map.insert(TaskId(k), v);
+            }
+        }
+        TasksFormat::List(l) => {
+            for mut node in l {
+                if node.id.0.is_empty() {
+                    node.id = TaskId::new();
+                }
+                map.insert(node.id.clone(), node);
+            }
+        }
+        TasksFormat::ListMap(lm) => {
+            for inner_map in lm {
+                for (k, mut v) in inner_map {
+                    if v.id.0.is_empty() || v.id.0 == "pending" {
+                        v.id = TaskId(k.clone());
+                    }
+                    map.insert(TaskId(k), v);
+                }
+            }
+        }
+    }
+
+    Ok(map)
 }
 
 impl ExecutionPlan {
@@ -111,8 +163,9 @@ Your goal is to decompose a high-level objective into a Directed Acyclic Graph (
 1. CHECK FOR COMPLETION: Read the CONTEXT carefully. If the user's objective is ALREADY fully satisfied by the previous information or task results, DO NOT generate any tasks.
 2. If satisfied, provide a natural language summary in the "content" field and leave "tasks" empty.
 3. If tasks are needed, decompose the goal into minimal necessary steps.
-4. If a skill matches the domain (e.g. 'rust_expert' for a Rust task), prioritize calling it to get the roadmap.
-5. Output the plan as JSON.
+4. EXACT TOOL NAMES: You MUST use the EXACT tool names provided in the "AVAILABLE TOOLS & SKILLS" section. DO NOT guess or hallucinate tool names.
+5. JSON FORMAT: Output the plan as a SINGLE JSON OBJECT. "tasks" should be a map where keys are task IDs and values are task nodes.
+6. If a skill matches the domain (e.g. 'rust_expert' for a Rust task), prioritize calling it to get the roadmap.
 
 Example:
 {{
@@ -183,9 +236,9 @@ JSON OUTPUT:
                 // If content is still the full raw response, clean it up
                 if plan.content.is_empty() || plan.content == content {
                     if plan.tasks.is_empty() {
-                        plan.content = "I have reviewed the state and the goal is achieved. No further tasks are required.".into();
+                        plan.content = PLAN_BOILERPLATE_NO_TASKS.into();
                     } else {
-                        plan.content = "I have planned the next steps to achieve the goal.".into(); 
+                        plan.content = PLAN_BOILERPLATE_TASKS.into(); 
                     }
                 }
                 tracing::info!(tasks_count = plan.tasks.len(), "Execution plan parsed successfully");
@@ -246,5 +299,53 @@ mod tests {
         let plan: ExecutionPlan = serde_json::from_str::<ExecutionPlan>(json).unwrap();
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.content, "");
+    }
+
+    #[test]
+    fn test_execution_plan_deserialization_gemini_style() {
+        let json = r#"{
+            "tasks": [
+                {
+                    "task_1": {
+                        "id": "task_1",
+                        "name": "Search Task",
+                        "description": "Searching for bots",
+                        "tool_name": "search",
+                        "dependencies": []
+                    }
+                },
+                {
+                    "task_2": {
+                        "id": "task_2",
+                        "name": "Review Task",
+                        "description": "Reviewing results",
+                        "tool_name": "review",
+                        "dependencies": ["task_1"]
+                    }
+                }
+            ]
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str::<ExecutionPlan>(json).unwrap();
+        assert_eq!(plan.tasks.len(), 2);
+        assert!(plan.tasks.contains_key(&TaskId("task_1".into())));
+        assert!(plan.tasks.contains_key(&TaskId("task_2".into())));
+        assert_eq!(plan.tasks.get(&TaskId("task_2".into())).unwrap().dependencies[0].0, "task_1");
+    }
+
+    #[test]
+    fn test_execution_plan_deserialization_list_style() {
+        let json = r#"{
+            "tasks": [
+                {
+                    "id": "task_1",
+                    "name": "List Task",
+                    "description": "Doing things",
+                    "tool_name": "echo"
+                }
+            ]
+        }"#;
+        let plan: ExecutionPlan = serde_json::from_str::<ExecutionPlan>(json).unwrap();
+        assert_eq!(plan.tasks.len(), 1);
+        assert!(plan.tasks.contains_key(&TaskId("task_1".into())));
     }
 }
