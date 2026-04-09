@@ -81,11 +81,9 @@ impl<S: StorageBackend> MemoryLayer for SessionSummarizer<S> {
         let summary = self.generate_summary(context).await?;
         
         // 2. Perform fidelity validation if enabled.
-        if self.validation_mode {
-            if !self.validate_summary_fidelity(&summary, context).await? {
-                tracing::warn!("Summary fidelity check FAILED. Retaining original context.");
-                return Ok(());
-            }
+        if self.validation_mode && !self.validate_summary_fidelity(&summary, context).await? {
+            tracing::warn!("Summary fidelity check FAILED. Retaining original context.");
+            return Ok(());
         }
 
         // 3. Persist narrative to markdown (Gap 3 & Improvement 3).

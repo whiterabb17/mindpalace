@@ -60,7 +60,7 @@ impl MemoryLayer for PersonalityGuard {
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
         // 1. Core Identity Enforcement (Hard anchor at index 0)
         let has_persona = context.items.first()
-            .map_or(false, |i| i.role == MemoryRole::System && i.content.contains(&self.core_persona));
+            .is_some_and(|i| i.role == MemoryRole::System && i.content.contains(&self.core_persona));
             
         if !has_persona {
             context.items.insert(0, MemoryItem {

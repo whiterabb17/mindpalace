@@ -11,6 +11,12 @@ pub const PLAN_BOILERPLATE_NO_TASKS: &str = "I have reviewed the state and the g
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TaskId(pub String);
 
+impl Default for TaskId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskId {
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())

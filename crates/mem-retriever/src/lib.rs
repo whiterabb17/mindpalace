@@ -88,8 +88,10 @@ pub struct RuVectorStore {
 impl RuVectorStore {
     /// Initializes a new RuVectorStore with the specified dimension and metric.
     pub fn new(dim: usize, metric: DistanceMetric, graph: Arc<FactGraph>) -> Self {
-        let mut config = HnswConfig::default();
-        config.max_elements = 100_000;
+        let config = HnswConfig {
+            max_elements: 100_000,
+            ..Default::default()
+        };
         Self {
             index: RwLock::new(HnswIndex::new(dim, metric, config).expect("Failed to initialize HnswIndex")),
             graph,
@@ -159,8 +161,10 @@ impl VectorStore for RuVectorStore {
         let mut metadata = self.metadata.write().await;
         metadata.clear();
         let mut index = self.index.write().await;
-        let mut config = HnswConfig::default();
-        config.max_elements = self.max_elements;
+        let config = HnswConfig {
+            max_elements: self.max_elements,
+            ..Default::default()
+        };
         *index = HnswIndex::new(self.dim, self.metric, config).expect("Failed to reset HnswIndex");
         Ok(())
     }
@@ -197,6 +201,12 @@ impl<S: StorageBackend> MemoryRetriever<S> {
     /// This method performs mass re-embedding if required, ensuring that the 
     /// volatility of semantic indexes does not result in data loss.
     pub async fn hydrate_from_kb(&self, kb_path: &str) -> anyhow::Result<()> {
+        self.store.clear().await?;
+        self.append_from_kb(kb_path).await
+    }
+
+    /// Appends facts from a persistent KnowledgeBase into the current semantic vector index.
+    pub async fn append_from_kb(&self, kb_path: &str) -> anyhow::Result<()> {
         if !self.storage.exists(kb_path).await { return Ok(()); }
         let data = self.storage.retrieve(kb_path).await?;
         if data.is_empty() { return Ok(()); }
@@ -205,7 +215,6 @@ impl<S: StorageBackend> MemoryRetriever<S> {
             tracing::warn!("Failed to parse knowledge base from {}: {}. Starting fresh.", kb_path, e);
             KnowledgeBase::new(None).unwrap_or_default()
         });
-        self.store.clear().await?;
         
         for fact in kb.graph.all_active_facts() {
             let embedding = if let Some(ref emb) = fact.embedding {

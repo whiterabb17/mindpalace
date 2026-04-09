@@ -40,7 +40,7 @@ impl<S: StorageBackend> MemoryLayer for AgentBridge<S> {
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
         // Gap 7: Multi-agent coordination logic.
         // If the context has a 'freeze' metadata trigger, perform an automatic snapshot.
-        let should_freeze = context.items.last().map_or(false, |i| {
+        let should_freeze = context.items.last().is_some_and(|i| {
             i.metadata["freeze_trigger"].as_str().is_some()
         });
 

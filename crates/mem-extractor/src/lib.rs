@@ -178,7 +178,7 @@ pub enum ConflictResolution {
     /// Preference for the fact with the higher model confidence score.
     KeepHighestConfidence, 
     /// Merges two facts into a third, unified version.
-    Merge(FactNode), 
+    Merge(Box<FactNode>), 
     /// Marks the contradiction for human review or external escalation.
     Escalate 
 }
@@ -192,17 +192,14 @@ impl ConflictResolver {
         for category in categories {
             let current_facts = kb.graph.query_current(&category);
             if current_facts.len() > 1 {
-                match self.resolve_conflict(current_facts.clone()).await? {
-                    ConflictResolution::KeepHighestConfidence => {
-                        let best = current_facts.into_iter().max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap()).unwrap();
-                        for fact in kb.graph.query_current(&category) {
-                            if fact.id != best.id {
-                                // Link superseded nodes in the graph instead of deleting them.
-                                kb.graph.link_superseded(&fact.id, &best.id)?;
-                            }
+                if let ConflictResolution::KeepHighestConfidence = self.resolve_conflict(current_facts.clone()).await? {
+                    let best = current_facts.into_iter().max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap()).unwrap();
+                    for fact in kb.graph.query_current(&category) {
+                        if fact.id != best.id {
+                            // Link superseded nodes in the graph instead of deleting them.
+                            kb.graph.link_superseded(&fact.id, &best.id)?;
                         }
                     }
-                    _ => {}
                 }
             }
         }
@@ -214,9 +211,11 @@ impl ConflictResolver {
         let prompt = format!("Resolve conflict between facts (KeepHighestConfidence, Merge, Escalate):\n{}", 
             facts.iter().enumerate().map(|(i, f)| format!("{}. [conf: {}] {}", i+1, f.confidence, f.content)).collect::<Vec<_>>().join("\n"));
         let res = self.llm.completion(&prompt).await?;
-        if res.contains("KeepHighestConfidence") { Ok(ConflictResolution::KeepHighestConfidence) }
-        else if res.contains("Merge") { Ok(ConflictResolution::KeepHighestConfidence) }
-        else { Ok(ConflictResolution::Escalate) }
+        if res.contains("KeepHighestConfidence") || res.contains("Merge") { 
+            Ok(ConflictResolution::KeepHighestConfidence) 
+        } else { 
+            Ok(ConflictResolution::Escalate) 
+        }
     }
 }
 
@@ -226,7 +225,7 @@ impl<S: StorageBackend> MemoryLayer for FactExtractor<S> {
 
     /// Executes the extraction and commitment logic if a "milestone" is flagged in metadata.
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
-        if context.items.last().map_or(false, |item| item.metadata["milestone"].as_bool().unwrap_or(false)) {
+        if context.items.last().is_some_and(|item| item.metadata["milestone"].as_bool().unwrap_or(false)) {
             let facts = self.extract_facts(context).await?;
             self.commit_knowledge(facts).await?;
         }

@@ -258,6 +258,12 @@ pub struct KeywordMatcher {
     low_importance: Regex,
 }
 
+impl Default for KeywordMatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeywordMatcher {
     pub fn new() -> Self {
         Self {

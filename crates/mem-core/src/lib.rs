@@ -145,13 +145,9 @@ impl FactNode {
                 .get(key)
                 .and_then(|v| serde_json::to_value(v).ok())
                 .and_then(|jv| {
-                    if let Some(s) = jv.as_str() {
-                        Some(s.to_string())
-                    } else if let Some(s) = jv.get("String").and_then(|s| s.as_str()) {
-                        Some(s.to_string())
-                    } else {
-                        None
-                    }
+                    jv.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| jv.get("String").and_then(|s| s.as_str()).map(|s| s.to_string()))
                 })
                 .unwrap_or_default()
         };
@@ -160,13 +156,9 @@ impl FactNode {
                 .get(key)
                 .and_then(|v| serde_json::to_value(v).ok())
                 .and_then(|jv| {
-                    if let Some(f) = jv.as_f64() {
-                        Some(f as f32)
-                    } else if let Some(f) = jv.get("Float").and_then(|f| f.as_f64()) {
-                        Some(f as f32)
-                    } else {
-                        None
-                    }
+                    jv.as_f64()
+                        .map(|f| f as f32)
+                        .or_else(|| jv.get("Float").and_then(|f| f.as_f64()).map(|f| f as f32))
                 })
                 .unwrap_or(0.0)
         };
@@ -175,15 +167,17 @@ impl FactNode {
                 .get(key)
                 .and_then(|v| serde_json::to_value(v).ok())
                 .and_then(|jv| {
-                    if let Some(u) = jv.as_u64() {
-                        Some(u)
-                    } else if let Some(u) = jv.get("Int").and_then(|i| i.as_i64()) {
-                        Some(u as u64)
-                    } else if let Some(u) = jv.get("Integer").and_then(|i| i.as_i64()) {
-                        Some(u as u64)
-                    } else {
-                        None
-                    }
+                    jv.as_u64()
+                        .or_else(|| {
+                            jv.get("Int")
+                                .and_then(|i| i.as_i64())
+                                .map(|u| u as u64)
+                        })
+                        .or_else(|| {
+                            jv.get("Integer")
+                                .and_then(|i| i.as_i64())
+                                .map(|u| u as u64)
+                        })
                 })
                 .unwrap_or(0)
         };
@@ -192,15 +186,18 @@ impl FactNode {
                 .get(key)
                 .and_then(|v| serde_json::to_value(v).ok())
                 .and_then(|jv| {
-                    if let Some(u) = jv.as_u64() {
-                        Some(u as u32)
-                    } else if let Some(u) = jv.get("Int").and_then(|i| i.as_i64()) {
-                        Some(u as u32)
-                    } else if let Some(u) = jv.get("Integer").and_then(|i| i.as_i64()) {
-                        Some(u as u32)
-                    } else {
-                        None
-                    }
+                    jv.as_u64()
+                        .map(|u| u as u32)
+                        .or_else(|| {
+                            jv.get("Int")
+                                .and_then(|i| i.as_i64())
+                                .map(|u| u as u32)
+                        })
+                        .or_else(|| {
+                            jv.get("Integer")
+                                .and_then(|i| i.as_i64())
+                                .map(|u| u as u32)
+                        })
                 })
                 .unwrap_or(1)
         };
@@ -757,9 +754,7 @@ impl ModelProvider for OllamaProvider {
                         .map(|m| {
                             if m.name.contains("qwen2.5-coder") {
                                 32768
-                            } else if m.name.contains("llama3.2") {
-                                131072
-                            } else if m.name.contains("llama3.1") {
+                            } else if m.name.contains("llama3.2") || m.name.contains("llama3.1") {
                                 131072
                             } else if m.name.contains("mistral") {
                                 32768
@@ -1386,15 +1381,13 @@ impl ModelProvider for AnthropicProvider {
                         let data = line.trim_start_matches("data: ");
                         if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                             match event {
-                                AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
-                                    if let AnthropicContent::ToolUse { id, name, .. } = content_block {
-                                        yield ResponseChunk {
-                                            content_delta: None,
-                                            tool_call_delta: Some(ToolCallDelta { name: Some(name), arguments_delta: None, id: Some(id) }),
-                                            usage: None,
-                                            is_final: false
-                                        };
-                                    }
+                                AnthropicStreamEvent::ContentBlockStart { content_block: AnthropicContent::ToolUse { id, name, .. }, .. } => {
+                                    yield ResponseChunk {
+                                        content_delta: None,
+                                        tool_call_delta: Some(ToolCallDelta { name: Some(name), arguments_delta: None, id: Some(id) }),
+                                        usage: None,
+                                        is_final: false
+                                    };
                                 },
                                 AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
                                     match delta {
