@@ -1626,6 +1626,25 @@ impl ModelProvider for OpenAiProvider {
             });
         }
 
+        // --- SECONDARY SAFETY: Sanitize message sequence for OpenAI ---
+        // OpenAI requires that 'tool' messages immediately follow an 'assistant' message with 'tool_calls'.
+        let mut sanitized = Vec::new();
+        for msg in messages {
+            if msg.role == "tool" {
+                let prev_is_valid_assistant = sanitized.last().map(|prev: &OpenAiMessage| {
+                    prev.role == "assistant" && prev.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false)
+                }).unwrap_or(false);
+
+                if !prev_is_valid_assistant {
+                    tracing::warn!("OpenAI Provider: Dropping orphaned 'tool' message to prevent API error. Sequence integrity was broken upstream.");
+                    continue;
+                }
+            }
+            sanitized.push(msg);
+        }
+        let mut messages = sanitized;
+
+
         messages.push(OpenAiMessage {
             role: "user".to_string(),
             content: Some(req.prompt),
