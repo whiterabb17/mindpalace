@@ -207,7 +207,7 @@ JSON OUTPUT:
         let req = mem_core::Request {
             prompt,
             context: std::sync::Arc::new(context.clone()),
-            tools,
+            tools: vec![],
         };
         let response = self.client.complete(req).await?;
         let usage = response.usage.clone();
