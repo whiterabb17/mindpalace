@@ -138,7 +138,14 @@ impl Brain {
 
             }
             
+            // 4. Safety Recoil: If we are still at a 'Tool' message (e.g. at idx 0), 
+            // we must advance to avoid an orphaned tool API error.
+            while start_idx < context.items.len() && context.items[start_idx].role == MemoryRole::Tool {
+                start_idx += 1;
+            }
+            
             // Finalize items
+
             final_items.extend(context.items.drain(start_idx..));
             context.items = final_items;
         }

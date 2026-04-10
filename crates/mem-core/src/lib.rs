@@ -1379,6 +1379,11 @@ impl ModelProvider for AnthropicProvider {
         // --- SECONDARY SAFETY: Sanitize message sequence for Anthropic ---
         let mut sanitized = Vec::new();
         let mut can_accept_tool = false;
+        
+        // DEBUG: Log the sequence we received
+        let roles: Vec<String> = messages.iter().map(|m| m.role.clone()).collect();
+        tracing::debug!("Anthropic Provider: Incoming roles: {:?}", roles);
+
         for msg in messages {
             let is_tool_response = match &msg.content {
                 AnthropicContentUnion::Multiple(blocks) => {
@@ -1407,6 +1412,7 @@ impl ModelProvider for AnthropicProvider {
             sanitized.push(msg);
         }
         let messages = sanitized;
+
 
 
 
@@ -1871,21 +1877,29 @@ impl ModelProvider for OpenAiProvider {
         // Multiple 'tool' messages can follow a single 'assistant' call.
         let mut sanitized = Vec::new();
         let mut can_accept_tool = false;
+        
+        // DEBUG: Log the sequence we received
+        let roles: Vec<String> = messages.iter().map(|m| m.role.clone()).collect();
+        tracing::debug!("OpenAI Provider: Incoming roles: {:?}", roles);
+
         for msg in messages {
             if msg.role == "assistant" {
                 can_accept_tool = msg.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
             } else if msg.role == "tool" {
                 if !can_accept_tool {
-                    tracing::warn!("OpenAI Provider: Dropping orphaned 'tool' message to prevent API error. Sequence integrity was broken upstream.");
+                    tracing::warn!(
+                        "OpenAI Provider: Dropping orphaned 'tool' message (ID: {:?}). Sequence integrity was broken upstream.",
+                        msg.tool_call_id
+                    );
                     continue;
                 }
-                // Keep can_accept_tool = true to allow subsequent tool results in the same block.
             } else {
                 can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let mut messages = sanitized;
+
 
 
 
@@ -2363,6 +2377,11 @@ impl ModelProvider for GeminiProvider {
         // --- SECONDARY SAFETY: Sanitize message sequence for Gemini ---
         let mut sanitized = Vec::new();
         let mut can_accept_tool = false;
+        
+        // DEBUG: Log the sequence we received
+        let roles: Vec<String> = contents.iter().map(|c| c.role.clone()).collect();
+        tracing::debug!("Gemini Provider: Incoming roles: {:?}", roles);
+
         for msg in contents {
             let has_tool_use = msg.parts.iter().any(|p| p.function_call.is_some());
             let is_tool_response = msg.parts.iter().any(|p| p.function_response.is_some());
@@ -2380,6 +2399,7 @@ impl ModelProvider for GeminiProvider {
             sanitized.push(msg);
         }
         let mut contents = sanitized;
+
 
 
 
