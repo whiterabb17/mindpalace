@@ -794,6 +794,26 @@ impl ModelProvider for OllamaProvider {
             }));
         }
 
+        // --- SECONDARY SAFETY: Sanitize message sequence ---
+        let mut sanitized = Vec::new();
+        for msg in messages {
+            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                if role == "tool" {
+                    let prev_is_assistant = sanitized.last().and_then(|p: &serde_json::Value| {
+                        p.get("role").and_then(|r| r.as_str())
+                    }) == Some("assistant");
+
+                    if !prev_is_assistant {
+                        tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message.");
+                        continue;
+                    }
+                }
+            }
+            sanitized.push(msg);
+        }
+        let mut messages = sanitized;
+
+
         messages.push(serde_json::json!({
             "role": "user",
             "content": req.prompt,
@@ -964,6 +984,27 @@ impl ModelProvider for OllamaProvider {
                 "content": item.content,
             }));
         }
+
+        // --- SECONDARY SAFETY: Sanitize message sequence ---
+        let mut sanitized = Vec::new();
+        for msg in messages {
+            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                if role == "tool" {
+                    let prev_is_assistant = sanitized.last().and_then(|p: &serde_json::Value| {
+                        p.get("role").and_then(|r| r.as_str())
+                    }) == Some("assistant");
+
+                    if !prev_is_assistant {
+                        tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message (streaming).");
+                        continue;
+                    }
+
+                }
+            }
+            sanitized.push(msg);
+        }
+        let mut messages = sanitized;
+
         messages.push(serde_json::json!({
             "role": "user",
             "content": req.prompt,
@@ -1122,7 +1163,11 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
 }
+
+
 
 #[derive(Serialize)]
 struct AnthropicTool {
@@ -1155,7 +1200,13 @@ enum AnthropicContent {
         name: String,
         input: serde_json::Value,
     },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
+
 
 #[derive(Deserialize)]
 struct AnthropicResponse {
@@ -1213,7 +1264,9 @@ impl LlmClient for AnthropicProvider {
             messages,
             tools: vec![],
             stream: false,
+            system: None,
         };
+
 
         let res = client
             .post("https://api.anthropic.com/v1/messages")
@@ -1244,22 +1297,97 @@ impl ModelProvider for AnthropicProvider {
     async fn complete(&self, req: Request) -> anyhow::Result<Response> {
         let client = reqwest::Client::new();
         let mut messages = Vec::new();
+        let mut system_prompt = None;
 
         for item in req.context.items.iter() {
-            let role = match item.role {
-                MemoryRole::User => "user",
-                _ => "assistant",
-            };
-            messages.push(AnthropicMessage {
-                role: role.to_string(),
-                content: AnthropicContentUnion::Single(item.content.clone()),
-            });
+            match item.role {
+                MemoryRole::System => {
+                    system_prompt = Some(item.content.clone());
+                }
+                MemoryRole::User => {
+                    messages.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: AnthropicContentUnion::Single(item.content.clone()),
+                    });
+                }
+                MemoryRole::Assistant => {
+                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                    if let Some(tcs) = tool_calls {
+                        let mut content_blocks = Vec::new();
+                        if !item.content.is_empty() {
+                            content_blocks.push(AnthropicContent::Text { text: item.content.clone() });
+                        }
+                        for tc in tcs {
+                            content_blocks.push(AnthropicContent::ToolUse {
+                                id: tc.id,
+                                name: tc.name,
+                                input: tc.arguments,
+                            });
+                        }
+                        messages.push(AnthropicMessage {
+                            role: "assistant".to_string(),
+                            content: AnthropicContentUnion::Multiple(content_blocks),
+                        });
+                    } else {
+                        messages.push(AnthropicMessage {
+                            role: "assistant".to_string(),
+                            content: AnthropicContentUnion::Single(item.content.clone()),
+                        });
+                    }
+                }
+                MemoryRole::Tool => {
+                    let tool_call_id = item.metadata.get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    messages.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: AnthropicContentUnion::Multiple(vec![AnthropicContent::ToolResult {
+                            tool_use_id: tool_call_id,
+                            content: item.content.clone(),
+                        }]),
+                    });
+                }
+            }
         }
 
         messages.push(AnthropicMessage {
             role: "user".to_string(),
             content: AnthropicContentUnion::Single(req.prompt),
         });
+
+        // --- SECONDARY SAFETY: Sanitize message sequence for Anthropic ---
+        let mut sanitized = Vec::new();
+        for msg in messages {
+            let is_tool_response = match &msg.content {
+                AnthropicContentUnion::Multiple(blocks) => {
+                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolResult { .. }))
+                }
+                _ => false,
+            };
+
+            if is_tool_response {
+                let prev_has_tool_use = sanitized.last().map(|prev: &AnthropicMessage| {
+                    match &prev.content {
+                        AnthropicContentUnion::Multiple(blocks) => {
+                            blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
+                        }
+                        _ => false,
+                    }
+                }).unwrap_or(false);
+
+                if !prev_has_tool_use {
+                    tracing::warn!("Anthropic Provider: Dropping orphaned tool result to avoid API error.");
+                    continue;
+                }
+            }
+            sanitized.push(msg);
+        }
+        let messages = sanitized;
+
 
         let tools = req
             .tools
@@ -1277,7 +1405,9 @@ impl ModelProvider for AnthropicProvider {
             messages,
             tools,
             stream: false,
+            system: system_prompt,
         };
+
 
         let res = client
             .post("https://api.anthropic.com/v1/messages")
@@ -1306,8 +1436,10 @@ impl ModelProvider for AnthropicProvider {
                         id,
                     });
                 }
+                AnthropicContent::ToolResult { .. } => {} // Should not be returned by model
             }
         }
+
 
                 let usage = Some(ResponseUsage {
             prompt_tokens: data.usage.input_tokens,
@@ -1328,22 +1460,97 @@ impl ModelProvider for AnthropicProvider {
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<ResponseChunk>>> {
         let client = reqwest::Client::new();
         let mut messages = Vec::new();
+        let mut system_prompt = None;
 
         for item in req.context.items.iter() {
-            let role = match item.role {
-                MemoryRole::User => "user",
-                _ => "assistant",
-            };
-            messages.push(AnthropicMessage {
-                role: role.to_string(),
-                content: AnthropicContentUnion::Single(item.content.clone()),
-            });
+            match item.role {
+                MemoryRole::System => {
+                    system_prompt = Some(item.content.clone());
+                }
+                MemoryRole::User => {
+                    messages.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: AnthropicContentUnion::Single(item.content.clone()),
+                    });
+                }
+                MemoryRole::Assistant => {
+                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                    if let Some(tcs) = tool_calls {
+                        let mut content_blocks = Vec::new();
+                        if !item.content.is_empty() {
+                            content_blocks.push(AnthropicContent::Text { text: item.content.clone() });
+                        }
+                        for tc in tcs {
+                            content_blocks.push(AnthropicContent::ToolUse {
+                                id: tc.id,
+                                name: tc.name,
+                                input: tc.arguments,
+                            });
+                        }
+                        messages.push(AnthropicMessage {
+                            role: "assistant".to_string(),
+                            content: AnthropicContentUnion::Multiple(content_blocks),
+                        });
+                    } else {
+                        messages.push(AnthropicMessage {
+                            role: "assistant".to_string(),
+                            content: AnthropicContentUnion::Single(item.content.clone()),
+                        });
+                    }
+                }
+                MemoryRole::Tool => {
+                    let tool_call_id = item.metadata.get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    messages.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: AnthropicContentUnion::Multiple(vec![AnthropicContent::ToolResult {
+                            tool_use_id: tool_call_id,
+                            content: item.content.clone(),
+                        }]),
+                    });
+                }
+            }
         }
 
         messages.push(AnthropicMessage {
             role: "user".to_string(),
             content: AnthropicContentUnion::Single(req.prompt),
         });
+
+        // --- SECONDARY SAFETY: Sanitize message sequence for Anthropic ---
+        let mut sanitized = Vec::new();
+        for msg in messages {
+            let is_tool_response = match &msg.content {
+                AnthropicContentUnion::Multiple(blocks) => {
+                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolResult { .. }))
+                }
+                _ => false,
+            };
+
+            if is_tool_response {
+                let prev_has_tool_use = sanitized.last().map(|prev: &AnthropicMessage| {
+                    match &prev.content {
+                        AnthropicContentUnion::Multiple(blocks) => {
+                            blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
+                        }
+                        _ => false,
+                    }
+                }).unwrap_or(false);
+
+                if !prev_has_tool_use {
+                    tracing::warn!("Anthropic Provider: Dropping orphaned tool result to avoid API error (streaming).");
+                    continue;
+                }
+            }
+            sanitized.push(msg);
+        }
+        let messages = sanitized;
+
 
         let tools = req
             .tools
@@ -1361,7 +1568,9 @@ impl ModelProvider for AnthropicProvider {
             messages,
             tools,
             stream: true,
+            system: system_prompt,
         };
+
 
         let res = client
             .post("https://api.anthropic.com/v1/messages")
@@ -1381,14 +1590,20 @@ impl ModelProvider for AnthropicProvider {
                         let data = line.trim_start_matches("data: ");
                         if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                             match event {
-                                AnthropicStreamEvent::ContentBlockStart { content_block: AnthropicContent::ToolUse { id, name, .. }, .. } => {
-                                    yield ResponseChunk {
-                                        content_delta: None,
-                                        tool_call_delta: Some(ToolCallDelta { name: Some(name), arguments_delta: None, id: Some(id) }),
-                                        usage: None,
-                                        is_final: false
-                                    };
+                                AnthropicStreamEvent::ContentBlockStart { content_block, .. } => {
+                                    match content_block {
+                                        AnthropicContent::ToolUse { id, name, .. } => {
+                                            yield ResponseChunk {
+                                                content_delta: None,
+                                                tool_call_delta: Some(ToolCallDelta { name: Some(name), arguments_delta: None, id: Some(id) }),
+                                                usage: None,
+                                                is_final: false
+                                            };
+                                        },
+                                        _ => {} // Ignore Text blocks at start (handled in Delta) and ToolResults (not generated by model)
+                                    }
                                 },
+
                                 AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
                                     match delta {
                                         AnthropicDelta::TextDelta { text } => {
@@ -1751,6 +1966,24 @@ impl ModelProvider for OpenAiProvider {
             });
         }
 
+        // --- SECONDARY SAFETY: Sanitize message sequence for OpenAI ---
+        let mut sanitized = Vec::new();
+        for msg in messages {
+            if msg.role == "tool" {
+                let prev_is_valid_assistant = sanitized.last().map(|prev: &OpenAiMessage| {
+                    prev.role == "assistant" && prev.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false)
+                }).unwrap_or(false);
+
+                if !prev_is_valid_assistant {
+                    tracing::warn!("OpenAI Provider: Dropping orphaned 'tool' message to prevent API error (streaming).");
+                    continue;
+                }
+            }
+            sanitized.push(msg);
+        }
+        let mut messages = sanitized;
+
+
         messages.push(OpenAiMessage {
             role: "user".to_string(),
             content: Some(req.prompt),
@@ -1937,7 +2170,17 @@ struct GeminiPart {
     text: Option<String>,
     #[serde(rename = "functionCall", skip_serializing_if = "Option::is_none")]
     function_call: Option<GeminiFunctionCall>,
+    #[serde(rename = "functionResponse", skip_serializing_if = "Option::is_none")]
+    function_response: Option<GeminiFunctionResponse>,
 }
+
+
+#[derive(Serialize, Deserialize)]
+struct GeminiFunctionResponse {
+    name: String,
+    response: serde_json::Value,
+}
+
 
 #[derive(Serialize, Deserialize)]
 struct GeminiFunctionCall {
@@ -1976,7 +2219,9 @@ impl LlmClient for GeminiProvider {
             parts: vec![GeminiPart {
                 text: Some(prompt.to_string()),
                 function_call: None,
+                function_response: None,
             }],
+
         }];
         let req = GeminiRequest {
             contents,
@@ -2011,25 +2256,107 @@ impl ModelProvider for GeminiProvider {
         let mut contents = Vec::new();
 
         for item in req.context.items.iter() {
-            let role = match item.role {
-                MemoryRole::User => "user",
-                _ => "model",
-            };
-            contents.push(GeminiContent {
-                role: role.to_string(),
-                parts: vec![GeminiPart {
-                    text: Some(item.content.clone()),
-                    function_call: None,
-                }],
-            });
+            match item.role {
+                MemoryRole::User => {
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: Some(item.content.clone()),
+                            function_call: None,
+                            function_response: None,
+                        }],
+                    });
+                }
+                MemoryRole::Assistant => {
+                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                    let mut parts = Vec::new();
+                    if !item.content.is_empty() {
+                        parts.push(GeminiPart {
+                            text: Some(item.content.clone()),
+                            function_call: None,
+                            function_response: None,
+                        });
+                    }
+
+                    if let Some(tcs) = tool_calls {
+                        for tc in tcs {
+                            parts.push(GeminiPart {
+                                text: None,
+                                function_call: Some(GeminiFunctionCall {
+                                    name: tc.name,
+                                    args: tc.arguments,
+                                }),
+                                function_response: None,
+                            });
+                        }
+                    }
+
+                    contents.push(GeminiContent {
+                        role: "model".to_string(),
+                        parts,
+                    });
+                }
+                MemoryRole::Tool => {
+                    let tool_name = item.metadata.get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: None,
+                            function_call: None,
+                            function_response: Some(GeminiFunctionResponse {
+                                name: tool_name,
+                                response: serde_json::json!({ "result": item.content }),
+                            }),
+                        }],
+                    });
+                }
+                MemoryRole::System => {
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: Some(format!("System Instruction: {}", item.content)),
+                            function_call: None,
+                            function_response: None,
+                        }],
+                    });
+                }
+            }
         }
+
+        // --- SECONDARY SAFETY: Sanitize message sequence for Gemini ---
+        let mut sanitized = Vec::new();
+        for msg in contents {
+            let is_tool_response = msg.parts.iter().any(|p| p.function_response.is_some());
+
+            if is_tool_response {
+                let prev_has_tool_use = sanitized.last().map(|prev: &GeminiContent| {
+                    prev.parts.iter().any(|p| p.function_call.is_some())
+                }).unwrap_or(false);
+
+                if !prev_has_tool_use {
+                    tracing::warn!("Gemini Provider: Dropping orphaned tool response to avoid API error.");
+                    continue;
+                }
+            }
+            sanitized.push(msg);
+        }
+        let mut contents = sanitized;
+
 
         contents.push(GeminiContent {
             role: "user".to_string(),
             parts: vec![GeminiPart {
                 text: Some(req.prompt),
                 function_call: None,
+                function_response: None,
             }],
+
         });
 
         let tools = if req.tools.is_empty() {
@@ -2102,26 +2429,99 @@ impl ModelProvider for GeminiProvider {
         let mut contents = Vec::new();
 
         for item in req.context.items.iter() {
-            let role = match item.role {
-                MemoryRole::User => "user",
-                _ => "model",
-            };
-            contents.push(GeminiContent {
-                role: role.to_string(),
-                parts: vec![GeminiPart {
-                    text: Some(item.content.clone()),
-                    function_call: None,
-                }],
-            });
+            match item.role {
+                MemoryRole::User => {
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: Some(item.content.clone()),
+                            function_call: None,
+                            function_response: None,
+                        }],
+                    });
+                }
+                MemoryRole::Assistant => {
+                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                    let mut parts = Vec::new();
+                    if !item.content.is_empty() {
+                        parts.push(GeminiPart {
+                            text: Some(item.content.clone()),
+                            function_call: None,
+                            function_response: None,
+                        });
+                    }
+
+                    if let Some(tcs) = tool_calls {
+                        for tc in tcs {
+                            parts.push(GeminiPart {
+                                text: None,
+                                function_call: Some(GeminiFunctionCall {
+                                    name: tc.name,
+                                    args: tc.arguments,
+                                }),
+                                function_response: None,
+                            });
+                        }
+                    }
+
+                    contents.push(GeminiContent {
+                        role: "model".to_string(),
+                        parts,
+                    });
+                }
+                MemoryRole::Tool => {
+                    let tool_name = item.metadata.get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: None,
+                            function_call: None,
+                            function_response: Some(GeminiFunctionResponse {
+                                name: tool_name,
+                                response: serde_json::json!({ "result": item.content }),
+                            }),
+                        }],
+                    });
+                }
+                MemoryRole::System => {
+                    contents.push(GeminiContent {
+                        role: "user".to_string(),
+                        parts: vec![GeminiPart {
+                            text: Some(format!("System Instruction: {}", item.content)),
+                            function_call: None,
+                            function_response: None,
+                        }],
+                    });
+                }
+            }
         }
 
-        contents.push(GeminiContent {
-            role: "user".to_string(),
-            parts: vec![GeminiPart {
-                text: Some(req.prompt),
-                function_call: None,
-            }],
-        });
+        // --- SECONDARY SAFETY: Sanitize message sequence for Gemini ---
+        let mut sanitized = Vec::new();
+        for msg in contents {
+            let is_tool_response = msg.parts.iter().any(|p| p.function_response.is_some());
+
+            if is_tool_response {
+                let prev_has_tool_use = sanitized.last().map(|prev: &GeminiContent| {
+                    prev.parts.iter().any(|p| p.function_call.is_some())
+                }).unwrap_or(false);
+
+                if !prev_has_tool_use {
+                    tracing::warn!("Gemini Provider: Dropping orphaned tool response to avoid API error (streaming).");
+                    continue;
+                }
+            }
+            sanitized.push(msg);
+        }
+        let contents = sanitized;
+
+
 
         let tools = if req.tools.is_empty() {
             vec![]
