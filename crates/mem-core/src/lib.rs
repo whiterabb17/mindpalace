@@ -788,30 +788,39 @@ impl ModelProvider for OllamaProvider {
                 MemoryRole::System => "system",
                 MemoryRole::Tool => "tool",
             };
-            messages.push(serde_json::json!({
+            let mut msg = serde_json::json!({
                 "role": role,
                 "content": item.content,
-            }));
+            });
+
+            if let Some(tc) = item.metadata.get("tool_calls") {
+                msg["tool_calls"] = tc.clone();
+            }
+            if let Some(tcid) = item.metadata.get("tool_call_id") {
+                msg["tool_call_id"] = tcid.clone();
+            }
+            messages.push(msg);
         }
 
         // --- SECONDARY SAFETY: Sanitize message sequence ---
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in messages {
-            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
-                if role == "tool" {
-                    let prev_is_assistant = sanitized.last().and_then(|p: &serde_json::Value| {
-                        p.get("role").and_then(|r| r.as_str())
-                    }) == Some("assistant");
-
-                    if !prev_is_assistant {
-                        tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message.");
-                        continue;
-                    }
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role == "assistant" {
+                can_accept_tool = msg.get("tool_calls").map(|tc| !tc.is_null()).unwrap_or(false);
+            } else if role == "tool" {
+                if !can_accept_tool {
+                    tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message.");
+                    continue;
                 }
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let mut messages = sanitized;
+
 
 
         messages.push(serde_json::json!({
@@ -979,31 +988,39 @@ impl ModelProvider for OllamaProvider {
                 MemoryRole::System => "system",
                 MemoryRole::Tool => "tool",
             };
-            messages.push(serde_json::json!({
+            let mut msg = serde_json::json!({
                 "role": role,
                 "content": item.content,
-            }));
+            });
+
+            if let Some(tc) = item.metadata.get("tool_calls") {
+                msg["tool_calls"] = tc.clone();
+            }
+            if let Some(tcid) = item.metadata.get("tool_call_id") {
+                msg["tool_call_id"] = tcid.clone();
+            }
+            messages.push(msg);
         }
 
         // --- SECONDARY SAFETY: Sanitize message sequence ---
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in messages {
-            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
-                if role == "tool" {
-                    let prev_is_assistant = sanitized.last().and_then(|p: &serde_json::Value| {
-                        p.get("role").and_then(|r| r.as_str())
-                    }) == Some("assistant");
-
-                    if !prev_is_assistant {
-                        tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message (streaming).");
-                        continue;
-                    }
-
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role == "assistant" {
+                can_accept_tool = msg.get("tool_calls").map(|tc| !tc.is_null()).unwrap_or(false);
+            } else if role == "tool" {
+                if !can_accept_tool {
+                    tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message (streaming).");
+                    continue;
                 }
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let mut messages = sanitized;
+
 
         messages.push(serde_json::json!({
             "role": "user",
@@ -1361,6 +1378,7 @@ impl ModelProvider for AnthropicProvider {
 
         // --- SECONDARY SAFETY: Sanitize message sequence for Anthropic ---
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in messages {
             let is_tool_response = match &msg.content {
                 AnthropicContentUnion::Multiple(blocks) => {
@@ -1369,24 +1387,27 @@ impl ModelProvider for AnthropicProvider {
                 _ => false,
             };
 
-            if is_tool_response {
-                let prev_has_tool_use = sanitized.last().map(|prev: &AnthropicMessage| {
-                    match &prev.content {
-                        AnthropicContentUnion::Multiple(blocks) => {
-                            blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
-                        }
-                        _ => false,
-                    }
-                }).unwrap_or(false);
+            let has_tool_use = match &msg.content {
+                AnthropicContentUnion::Multiple(blocks) => {
+                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
+                }
+                _ => false,
+            };
 
-                if !prev_has_tool_use {
+            if has_tool_use {
+                can_accept_tool = true;
+            } else if is_tool_response {
+                if !can_accept_tool {
                     tracing::warn!("Anthropic Provider: Dropping orphaned tool result to avoid API error.");
                     continue;
                 }
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let messages = sanitized;
+
 
 
         let tools = req
@@ -1524,6 +1545,7 @@ impl ModelProvider for AnthropicProvider {
 
         // --- SECONDARY SAFETY: Sanitize message sequence for Anthropic ---
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in messages {
             let is_tool_response = match &msg.content {
                 AnthropicContentUnion::Multiple(blocks) => {
@@ -1532,24 +1554,27 @@ impl ModelProvider for AnthropicProvider {
                 _ => false,
             };
 
-            if is_tool_response {
-                let prev_has_tool_use = sanitized.last().map(|prev: &AnthropicMessage| {
-                    match &prev.content {
-                        AnthropicContentUnion::Multiple(blocks) => {
-                            blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
-                        }
-                        _ => false,
-                    }
-                }).unwrap_or(false);
+            let has_tool_use = match &msg.content {
+                AnthropicContentUnion::Multiple(blocks) => {
+                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
+                }
+                _ => false,
+            };
 
-                if !prev_has_tool_use {
+            if has_tool_use {
+                can_accept_tool = true;
+            } else if is_tool_response {
+                if !can_accept_tool {
                     tracing::warn!("Anthropic Provider: Dropping orphaned tool result to avoid API error (streaming).");
                     continue;
                 }
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let messages = sanitized;
+
 
 
         let tools = req
@@ -1842,22 +1867,26 @@ impl ModelProvider for OpenAiProvider {
         }
 
         // --- SECONDARY SAFETY: Sanitize message sequence for OpenAI ---
-        // OpenAI requires that 'tool' messages immediately follow an 'assistant' message with 'tool_calls'.
+        // OpenAI requires that 'tool' messages follow an 'assistant' message with 'tool_calls'.
+        // Multiple 'tool' messages can follow a single 'assistant' call.
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in messages {
-            if msg.role == "tool" {
-                let prev_is_valid_assistant = sanitized.last().map(|prev: &OpenAiMessage| {
-                    prev.role == "assistant" && prev.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false)
-                }).unwrap_or(false);
-
-                if !prev_is_valid_assistant {
+            if msg.role == "assistant" {
+                can_accept_tool = msg.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
+            } else if msg.role == "tool" {
+                if !can_accept_tool {
                     tracing::warn!("OpenAI Provider: Dropping orphaned 'tool' message to prevent API error. Sequence integrity was broken upstream.");
                     continue;
                 }
+                // Keep can_accept_tool = true to allow subsequent tool results in the same block.
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let mut messages = sanitized;
+
 
 
         messages.push(OpenAiMessage {
@@ -1968,20 +1997,22 @@ impl ModelProvider for OpenAiProvider {
 
         // --- SECONDARY SAFETY: Sanitize message sequence for OpenAI ---
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in messages {
-            if msg.role == "tool" {
-                let prev_is_valid_assistant = sanitized.last().map(|prev: &OpenAiMessage| {
-                    prev.role == "assistant" && prev.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false)
-                }).unwrap_or(false);
-
-                if !prev_is_valid_assistant {
+            if msg.role == "assistant" {
+                can_accept_tool = msg.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
+            } else if msg.role == "tool" {
+                if !can_accept_tool {
                     tracing::warn!("OpenAI Provider: Dropping orphaned 'tool' message to prevent API error (streaming).");
                     continue;
                 }
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let mut messages = sanitized;
+
 
 
         messages.push(OpenAiMessage {
@@ -2331,22 +2362,25 @@ impl ModelProvider for GeminiProvider {
 
         // --- SECONDARY SAFETY: Sanitize message sequence for Gemini ---
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in contents {
+            let has_tool_use = msg.parts.iter().any(|p| p.function_call.is_some());
             let is_tool_response = msg.parts.iter().any(|p| p.function_response.is_some());
 
-            if is_tool_response {
-                let prev_has_tool_use = sanitized.last().map(|prev: &GeminiContent| {
-                    prev.parts.iter().any(|p| p.function_call.is_some())
-                }).unwrap_or(false);
-
-                if !prev_has_tool_use {
+            if has_tool_use {
+                can_accept_tool = true;
+            } else if is_tool_response {
+                if !can_accept_tool {
                     tracing::warn!("Gemini Provider: Dropping orphaned tool response to avoid API error.");
                     continue;
                 }
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let mut contents = sanitized;
+
 
 
         contents.push(GeminiContent {
@@ -2504,22 +2538,25 @@ impl ModelProvider for GeminiProvider {
 
         // --- SECONDARY SAFETY: Sanitize message sequence for Gemini ---
         let mut sanitized = Vec::new();
+        let mut can_accept_tool = false;
         for msg in contents {
+            let has_tool_use = msg.parts.iter().any(|p| p.function_call.is_some());
             let is_tool_response = msg.parts.iter().any(|p| p.function_response.is_some());
 
-            if is_tool_response {
-                let prev_has_tool_use = sanitized.last().map(|prev: &GeminiContent| {
-                    prev.parts.iter().any(|p| p.function_call.is_some())
-                }).unwrap_or(false);
-
-                if !prev_has_tool_use {
+            if has_tool_use {
+                can_accept_tool = true;
+            } else if is_tool_response {
+                if !can_accept_tool {
                     tracing::warn!("Gemini Provider: Dropping orphaned tool response to avoid API error (streaming).");
                     continue;
                 }
+            } else {
+                can_accept_tool = false;
             }
             sanitized.push(msg);
         }
         let contents = sanitized;
+
 
 
 
