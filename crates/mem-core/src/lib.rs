@@ -756,6 +756,8 @@ impl ModelProvider for OllamaProvider {
                                 262144
                             } else if m.name.contains("gemma4:e") {
                                 131072
+                            } else if m.name.contains("deepseek-r1") || m.name.contains("qwen3") {
+                                131072
                             } else if m.name.contains("qwen2.5-coder") {
                                 32768
                             } else if m.name.contains("llama3.2") || m.name.contains("llama3.1") {
