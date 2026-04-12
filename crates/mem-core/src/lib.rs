@@ -752,7 +752,11 @@ impl ModelProvider for OllamaProvider {
                         .into_iter()
                         .find(|m| m.name == self.model || m.name.starts_with(&self.model))
                         .map(|m| {
-                            if m.name.contains("qwen2.5-coder") {
+                            if m.name.contains("gemma4:26b") || m.name.contains("gemma4:31b") {
+                                262144
+                            } else if m.name.contains("gemma4:e") {
+                                131072
+                            } else if m.name.contains("qwen2.5-coder") {
                                 32768
                             } else if m.name.contains("llama3.2") || m.name.contains("llama3.1") {
                                 131072
