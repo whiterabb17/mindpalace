@@ -752,17 +752,18 @@ impl ModelProvider for OllamaProvider {
                         .into_iter()
                         .find(|m| m.name == self.model || m.name.starts_with(&self.model))
                         .map(|m| {
-                            if m.name.contains("gemma4:26b") || m.name.contains("gemma4:31b") {
+                            let name = m.name.to_lowercase();
+                            if name.contains("gemma4:26b") || name.contains("gemma4:31b") || name.contains("qwopus") {
                                 262144
-                            } else if m.name.contains("gemma4:e") {
+                            } else if name.contains("gemma4:e") {
                                 131072
-                            } else if m.name.contains("deepseek-r1") || m.name.contains("qwen3") {
+                            } else if name.contains("deepseek-r1") || name.contains("qwen3") {
                                 131072
-                            } else if m.name.contains("qwen2.5-coder") {
+                            } else if name.contains("qwen2.5-coder") {
                                 32768
-                            } else if m.name.contains("llama3.2") || m.name.contains("llama3.1") {
+                            } else if name.contains("llama3.2") || name.contains("llama3.1") {
                                 131072
-                            } else if m.name.contains("mistral") {
+                            } else if name.contains("mistral") {
                                 32768
                             } else {
                                 2048
