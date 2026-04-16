@@ -7,6 +7,8 @@
 ## 🗝️ Key Features
 
 - **Relational Knowledge Graph**: Built on top of `ruvector-graph`, providing `FactNode` and `FactGraph` for structured memory.
+- **Standard Search Engines**: Includes a high-performance **SqliteSearchEngine** with FTS5 virtual tables for keyword and semantic lookups.
+- **Privacy Filtering**: Built-in regex scrubbing for content within `<private>...</private>` tags before fact extraction.
 - **Hierarchical Scoping**: Categorize knowledge as `Private` (session), `Project` (team), or `Global` (world-wide technical facts).
 - **Short-Term Context**: Robust `Context` and `MemoryItem` structures for managing conversation history.
 - **Foundational Traits**:

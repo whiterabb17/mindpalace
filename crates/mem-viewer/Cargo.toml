@@ -1,0 +1,15 @@
+[package]
+name = "mem-viewer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = "0.7"
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+mem-core = { path = "../mem-core" }
+anyhow.workspace = true
+tracing.workspace = true

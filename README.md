@@ -26,6 +26,7 @@ MindPalace is composed of 14 specialized crates, each handling a specific dimens
 | **`mem-broker`** | **Collective Learning** | Global fact broadcast and synchronization across agent fleets. |
 | **`mem-planner`** | **Cognitive Planning** | Decomposes goals into Directed Acyclic Graphs (DAG) of tasks. |
 | **`mem-resilience`**| **System Safety** | Circuit breakers and emergency JSON snapshotting on failures. |
+| **`mem-viewer`** | **Telemetry UI** | Real-time glassmorphic memory dashboard (port 37777). |
 
 ---
 
@@ -40,6 +41,7 @@ MindPalace orchestrates memory through seven distinct priority levels, ensuring 
 5.  **Fact Extraction (P5)**: `mem-extractor` identifies durable facts and commits them to the persistent Knowledge Graph.
 6.  **Dream Consolidation (P6)**: `mem-dreamer` (Background) synthesizes long-term patterns and cross-session insights.
 7.  **Multi-Agent Bridge (P7)**: `mem-bridge` finalizes the context for inheritance by child agents or parallel tasks.
+8.  **Progressive Disclosure (PD)**: `mem-broker` tools allow agents to selectively query the graph via `search_memory` if micro-compaction is in PD mode.
 
 ---
 

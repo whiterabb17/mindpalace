@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub mod db;
+
 use once_cell::sync::Lazy;
 use tiktoken_rs::cl100k_base;
 
@@ -428,6 +430,23 @@ pub struct MemoryItem {
 pub struct Context {
     /// List of ordered memory items.
     pub items: Vec<MemoryItem>,
+}
+
+impl Context {
+    /// Scrubs any text enclosed in `<private>...</private>` tags from all active items.
+    /// This should be run before extracting or storing facts.
+    pub fn apply_privacy_filter(&mut self) -> usize {
+        let mut scrubbed_count = 0;
+        let re = regex::Regex::new(r"(?s)<private>.*?</private>").unwrap();
+        
+        for item in &mut self.items {
+            if re.is_match(&item.content) {
+                item.content = re.replace_all(&item.content, "[REDACTED]").to_string();
+                scrubbed_count += 1;
+            }
+        }
+        scrubbed_count
+    }
 }
 
 /// A specialized logic layer that transforms or prunes the agent's context.

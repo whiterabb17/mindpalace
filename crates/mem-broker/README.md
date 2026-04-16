@@ -11,6 +11,7 @@
 - **Atomic Synchronization**: Uses a file-based global lock to ensure safe, atomic updates to the shared knowledge pool from multiple agents.
 - **Pull-Based Integration**: Allows agents to pull shared knowledge from a common backend (e.g., S3, Shared Drive) and integrate it into their local fact graphs.
 - **Agent Interoperability**: Decouples knowledge producers from consumers, providing a standardized, structured JSON-based fact format for fleet communication.
+- **Progressive Disclosure Suite**: Provides explicit search tools (`search_memory`, `get_timeline`, `get_observation`) for agents to minimize token consumption in large contexts.
 
 ## 🏗️ Core Mechanism
 
@@ -37,6 +38,32 @@ async fn main() -> anyhow::Result<()> {
     // Pull the latest shared knowledge from other agents in the fleet
     let fleet_knowledge = broker.pull_shared_knowledge().await?;
     
+    Ok(())
+}
+```
+
+## 🔍 Progressive Disclosure Integration
+
+Agents should use the built-in search tools to fetch specific facts only when needed.
+
+```rust
+use mem_broker::tools::{get_progressive_disclosure_tools, execute_tool};
+use mem_core::db::SqliteSearchEngine;
+use mem_core::FactGraph;
+use std::sync::Arc;
+
+async fn search_example() -> anyhow::Result<()> {
+    let engine = Arc::new(SqliteSearchEngine::new(None)?);
+    let graph = Arc::new(FactGraph::new(None)?);
+    
+    // 1. Get definitions to expose to the Agent (Schema/Parameters)
+    let tools = get_progressive_disclosure_tools();
+    
+    // 2. Execute a search (called by LLM via tool call)
+    let query = serde_json::json!({ "query": "rust security" });
+    let results = execute_tool("search_memory", &query, &engine, &graph)?;
+    
+    println!("Search results: {}", results);
     Ok(())
 }
 ```

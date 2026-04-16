@@ -3,6 +3,8 @@ use fs4::FileExt;
 use std::fs::File;
 use std::path::PathBuf;
 
+pub mod tools;
+
 /// A central broker for broadcasting and synchronizing multi-agent knowledge.
 ///
 /// The FactBroker facilitates "Collective Learning" by allowing agents to publish 
