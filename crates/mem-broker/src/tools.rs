@@ -1,6 +1,6 @@
-use mem_core::ToolDefinition;
 use mem_core::db::SqliteSearchEngine;
 use mem_core::FactGraph;
+use mem_core::ToolDefinition;
 use serde_json::json;
 
 /// Generates the Tool Definitions for Progressive Disclosure explicitly exposed to the AI agent.
@@ -44,7 +44,7 @@ pub fn get_progressive_disclosure_tools() -> Vec<ToolDefinition> {
 
 /// Dispatches standard memory tool calls.
 pub fn execute_tool(
-    name: &str, 
+    name: &str,
     args: &serde_json::Value,
     search_engine: &SqliteSearchEngine,
     graph: &FactGraph,
@@ -53,11 +53,11 @@ pub fn execute_tool(
         "search_memory" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let results = search_engine.search(query)?;
-            
+
             if results.is_empty() {
                 return Ok("No relevant memory found.".to_string());
             }
-            
+
             let mut summary = String::from("Found the following IDs:\n");
             for id in results.iter().take(5) {
                 // Peek at Graph for small context snippet (simulating ~50 tokens per result)
@@ -81,7 +81,10 @@ pub fn execute_tool(
         "get_timeline" => {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let _results = search_engine.get_timeline(id, 5)?;
-            Ok("Timeline functionality activated. (Simulation wrapper returned empty history)".to_string())
+            Ok(
+                "Timeline functionality activated. (Simulation wrapper returned empty history)"
+                    .to_string(),
+            )
         }
         _ => Err(anyhow::anyhow!("Unknown tool name: {}", name)),
     }

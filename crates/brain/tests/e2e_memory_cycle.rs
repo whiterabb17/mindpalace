@@ -1,12 +1,15 @@
+use async_trait::async_trait;
 use brain::Brain;
-use mem_core::{Context, MemoryItem, MemoryRole, MindPalaceConfig, FileStorage, StorageBackend, LlmClient, EmbeddingProvider, ImportanceAnalyzer};
-use mem_extractor::{FactExtractor, ReflectionLayer};
-use mem_session::SessionSummarizer;
-use mem_micro::{AdaptiveMicroCompactor, TTLDecayStrategy};
 use mem_core::analysis::{HeuristicImportanceAnalyzer, KeywordRelevanceAnalyzer};
+use mem_core::{
+    Context, EmbeddingProvider, FileStorage, ImportanceAnalyzer, LlmClient, MemoryItem, MemoryRole,
+    MindPalaceConfig, StorageBackend,
+};
+use mem_extractor::{FactExtractor, ReflectionLayer};
+use mem_micro::{AdaptiveMicroCompactor, TTLDecayStrategy};
+use mem_session::SessionSummarizer;
 use std::sync::Arc;
 use tempfile::tempdir;
-use async_trait::async_trait;
 
 // --- Production-Ready Test Implementation (NO MOCKS in logic) ---
 
@@ -45,7 +48,7 @@ async fn test_e2e_memory_pipeline_cycle() -> anyhow::Result<()> {
     let config = MindPalaceConfig {
         similarity_threshold: 0.85,
         compression_ratio: 0.5,
-        max_context_items: 5, 
+        max_context_items: 5,
         base_ttl_seconds: 3600,
         idle_threshold_mins: 45,
         summary_interval: 3,
@@ -89,7 +92,7 @@ async fn test_e2e_memory_pipeline_cycle() -> anyhow::Result<()> {
 
     let mut context = Context::default();
     let now = chrono::Utc::now().timestamp() as u64;
-    
+
     // START with System Prompt
     context.items.push(MemoryItem {
         role: MemoryRole::System,
@@ -124,7 +127,9 @@ async fn test_e2e_memory_pipeline_cycle() -> anyhow::Result<()> {
 
     // Verify summarization happened
     assert!(context.items.len() <= 3);
-    assert!(context.items[0].content.contains("SESSION NARRATIVE SUMMARY"));
+    assert!(context.items[0]
+        .content
+        .contains("SESSION NARRATIVE SUMMARY"));
 
     // Step 3: Hard Limit Protection (max_context_items = 5)
     for i in 0..10 {
@@ -149,8 +154,13 @@ async fn test_e2e_memory_pipeline_cycle() -> anyhow::Result<()> {
         timestamp: now,
         metadata: serde_json::json!({}),
     };
-    let score = heuristic.score_importance(&important_item, &context).await?;
-    assert!(score > 0.7, "Heuristic should score important architectural keywords highly.");
+    let score = heuristic
+        .score_importance(&important_item, &context)
+        .await?;
+    assert!(
+        score > 0.7,
+        "Heuristic should score important architectural keywords highly."
+    );
 
     Ok(())
 }

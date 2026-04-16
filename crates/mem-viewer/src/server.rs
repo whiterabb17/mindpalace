@@ -4,10 +4,10 @@ use axum::{
     routing::get,
     Router,
 };
+use mem_core::{Context, FactGraph};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use mem_core::{Context, FactGraph};
 
 #[derive(Clone)]
 pub struct ViewerState {
@@ -24,7 +24,7 @@ pub async fn start_viewer(state: ViewerState, port: u16) -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     tracing::info!("Web viewer silently started on http://0.0.0.0:{}", port);
-    
+
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -52,7 +52,8 @@ async fn get_observation(
 }
 
 async fn index_handler() -> Html<&'static str> {
-    Html(r#"
+    Html(
+        r#"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -366,5 +367,6 @@ async fn index_handler() -> Html<&'static str> {
     </script>
 </body>
 </html>
-    "#)
+    "#,
+    )
 }

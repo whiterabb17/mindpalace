@@ -1,5 +1,5 @@
-use mem_core::{MemoryLayer, Context, StorageBackend};
 use async_trait::async_trait;
+use mem_core::{Context, MemoryLayer, StorageBackend};
 
 pub struct AgentBridge<S: StorageBackend> {
     pub storage: S,
@@ -24,7 +24,9 @@ impl<S: StorageBackend> AgentBridge<S> {
     pub async fn fork_context(&self, snapshot_id: &str) -> anyhow::Result<Context> {
         let path = format!("snapshots/{}.json", snapshot_id);
         let data = self.storage.retrieve(&path).await?;
-        if data.is_empty() { anyhow::bail!("Snapshot {} is empty", snapshot_id); }
+        if data.is_empty() {
+            anyhow::bail!("Snapshot {} is empty", snapshot_id);
+        }
         let context: Context = serde_json::from_slice(&data)?;
         tracing::info!("Context forked from: {}", snapshot_id);
         Ok(context)
@@ -40,12 +42,16 @@ impl<S: StorageBackend> MemoryLayer for AgentBridge<S> {
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
         // Gap 7: Multi-agent coordination logic.
         // If the context has a 'freeze' metadata trigger, perform an automatic snapshot.
-        let should_freeze = context.items.last().is_some_and(|i| {
-            i.metadata["freeze_trigger"].as_str().is_some()
-        });
+        let should_freeze = context
+            .items
+            .last()
+            .is_some_and(|i| i.metadata["freeze_trigger"].as_str().is_some());
 
         if should_freeze {
-            let id = context.items.last().unwrap().metadata["freeze_trigger"].as_str().unwrap().to_string();
+            let id = context.items.last().unwrap().metadata["freeze_trigger"]
+                .as_str()
+                .unwrap()
+                .to_string();
             self.freeze_context(&id, context).await?;
         }
 

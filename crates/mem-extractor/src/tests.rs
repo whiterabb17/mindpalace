@@ -1,8 +1,11 @@
 use super::*;
-use mem_core::{Context, MemoryItem, MemoryRole, LlmClient, EmbeddingProvider, MindPalaceConfig, StorageBackend, ImportanceAnalyzer};
 use async_trait::async_trait;
-use std::sync::Arc;
+use mem_core::{
+    Context, EmbeddingProvider, ImportanceAnalyzer, LlmClient, MemoryItem, MemoryRole,
+    MindPalaceConfig, StorageBackend,
+};
 use serde_json::json;
+use std::sync::Arc;
 
 struct MockLlm {
     response: String,
@@ -27,10 +30,18 @@ impl EmbeddingProvider for MockEmbeddings {
 struct MockStorage;
 #[async_trait]
 impl StorageBackend for MockStorage {
-    async fn store(&self, _id: &str, _data: &[u8]) -> anyhow::Result<()> { Ok(()) }
-    async fn retrieve(&self, _id: &str) -> anyhow::Result<Vec<u8>> { Ok(vec![]) }
-    async fn exists(&self, _id: &str) -> bool { false }
-    async fn list(&self, _prefix: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+    async fn store(&self, _id: &str, _data: &[u8]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn retrieve(&self, _id: &str) -> anyhow::Result<Vec<u8>> {
+        Ok(vec![])
+    }
+    async fn exists(&self, _id: &str) -> bool {
+        false
+    }
+    async fn list(&self, _prefix: &str) -> anyhow::Result<Vec<String>> {
+        Ok(vec![])
+    }
 }
 
 #[tokio::test]
@@ -48,7 +59,8 @@ async fn test_extract_facts_robustness() {
   }
 ]
 ```
-I hope this helps!".to_string();
+I hope this helps!"
+        .to_string();
 
     let extractor: FactExtractor<MockStorage> = FactExtractor::new(
         Arc::new(MockLlm { response }),
@@ -59,12 +71,14 @@ I hope this helps!".to_string();
         "test_session".to_string(),
     );
 
-    let context = Context { items: vec![MemoryItem {
-        role: MemoryRole::User,
-        content: "Tell me about Rust".to_string(),
-        timestamp: 0,
-        metadata: json!({}),
-    }] };
+    let context = Context {
+        items: vec![MemoryItem {
+            role: MemoryRole::User,
+            content: "Tell me about Rust".to_string(),
+            timestamp: 0,
+            metadata: json!({}),
+        }],
+    };
 
     let facts = extractor.extract_facts(&context).await.unwrap();
     assert_eq!(facts.len(), 1);
@@ -74,8 +88,10 @@ I hope this helps!".to_string();
 
 #[tokio::test]
 async fn test_score_importance_robustness() {
-    let response = "The importance score for this item is 0.85, because it contains critical session data.".to_string();
-    
+    let response =
+        "The importance score for this item is 0.85, because it contains critical session data."
+            .to_string();
+
     let extractor: FactExtractor<MockStorage> = FactExtractor::new(
         Arc::new(MockLlm { response }),
         Arc::new(MockEmbeddings),
@@ -93,6 +109,8 @@ async fn test_score_importance_robustness() {
     };
 
     let context = Context { items: vec![] };
-    let score = ImportanceAnalyzer::score_importance(&extractor, &item, &context).await.unwrap();
+    let score = ImportanceAnalyzer::score_importance(&extractor, &item, &context)
+        .await
+        .unwrap();
     assert!((score - 0.85).abs() < 0.001);
 }

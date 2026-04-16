@@ -1,11 +1,14 @@
-use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole, ImportanceAnalyzer, StorageBackend, MindPalaceConfig};
 use async_trait::async_trait;
+use mem_core::{
+    Context, ImportanceAnalyzer, LlmClient, MemoryItem, MemoryLayer, MemoryRole, MindPalaceConfig,
+    StorageBackend,
+};
 use std::sync::Arc;
 
 /// A heavy-duty memory layer for structural context compression when the session exceeds capacity.
 ///
-/// The IntelligentFullCompactor scores every context item by objective importance 
-/// and summarizes less-relevant segments using a 9-point structural model. 
+/// The IntelligentFullCompactor scores every context item by objective importance
+/// and summarizes less-relevant segments using a 9-point structural model.
 /// It also creates pre-compaction checkpoints for safety and disaster recovery.
 pub struct IntelligentFullCompactor<S: StorageBackend> {
     /// Client for model calls during importance analysis and summarization.
@@ -86,17 +89,28 @@ impl<S: StorageBackend> MemoryLayer for IntelligentFullCompactor<S> {
         // 2. Objective Scrutiny: Determine which items must remain in context.
         let mut scored_items: Vec<(usize, MemoryItem, f32)> = Vec::new();
         for (idx, item) in context.items.iter().enumerate() {
-            let score = self.importance_analyzer.score_importance(item, context).await?;
+            let score = self
+                .importance_analyzer
+                .score_importance(item, context)
+                .await?;
             scored_items.push((idx, item.clone(), score));
         }
 
         // 3. Keep high-importance items regardless of their position in time.
         // We keep the top 1/3 of items by importance score.
         scored_items.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-        
+
         let keep_count = (scored_items.len() / 3).max(1);
-        let high_importance: Vec<_> = scored_items.iter().take(keep_count).map(|(_, item, _)| item.clone()).collect();
-        let to_summarize: Vec<_> = scored_items.iter().skip(keep_count).map(|(_, item, _)| item.clone()).collect();
+        let high_importance: Vec<_> = scored_items
+            .iter()
+            .take(keep_count)
+            .map(|(_, item, _)| item.clone())
+            .collect();
+        let to_summarize: Vec<_> = scored_items
+            .iter()
+            .skip(keep_count)
+            .map(|(_, item, _)| item.clone())
+            .collect();
 
         // 4. Summarize less important items into a unified structural state.
         let mut history = String::new();
@@ -125,7 +139,7 @@ impl<S: StorageBackend> MemoryLayer for IntelligentFullCompactor<S> {
         let mut finalized_items = vec![summary_item];
         finalized_items.extend(high_importance);
         finalized_items.sort_by_key(|i| i.timestamp);
-        
+
         context.items = finalized_items;
 
         Ok(())

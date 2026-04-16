@@ -1,6 +1,6 @@
-use rusqlite::{Connection, Result, params};
-use std::path::PathBuf;
 use crate::FactNode;
+use rusqlite::{params, Connection, Result};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 pub struct SqliteSearchEngine {
@@ -18,7 +18,7 @@ impl SqliteSearchEngine {
         } else {
             Connection::open_in_memory()?
         };
-        
+
         // Ensure FTS5 is available (built-in with bundled)
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -29,7 +29,9 @@ impl SqliteSearchEngine {
             )",
             [],
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn insert_fact(&self, fact: &FactNode) -> Result<()> {
@@ -45,9 +47,9 @@ impl SqliteSearchEngine {
     pub fn search(&self, query: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id FROM memory_fts WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 20"
+            "SELECT id FROM memory_fts WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 20",
         )?;
-        
+
         let mapped = stmt.query_map(params![query], |row| row.get(0))?;
         let mut results = Vec::new();
         for id in mapped {
@@ -55,7 +57,7 @@ impl SqliteSearchEngine {
         }
         Ok(results)
     }
-    
+
     pub fn get_timeline(&self, _center_id: &str, _limit: usize) -> Result<Vec<String>> {
         // Timeline feature requires querying by timestamp
         // For simplicity, we just return empty or recent items if timestamp isn't indexed in FTS.

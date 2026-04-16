@@ -16,9 +16,8 @@ pub mod db;
 use once_cell::sync::Lazy;
 use tiktoken_rs::cl100k_base;
 
-static TOKENIZER: Lazy<tiktoken_rs::CoreBPE> = Lazy::new(|| {
-    cl100k_base().expect("Failed to initialize tiktoken")
-});
+static TOKENIZER: Lazy<tiktoken_rs::CoreBPE> =
+    Lazy::new(|| cl100k_base().expect("Failed to initialize tiktoken"));
 
 /// Global token estimator - uses tiktoken-rs with a stable singleton pattern.
 pub fn estimate_tokens(text: &str) -> usize {
@@ -147,9 +146,11 @@ impl FactNode {
                 .get(key)
                 .and_then(|v| serde_json::to_value(v).ok())
                 .and_then(|jv| {
-                    jv.as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| jv.get("String").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    jv.as_str().map(|s| s.to_string()).or_else(|| {
+                        jv.get("String")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
+                    })
                 })
                 .unwrap_or_default()
         };
@@ -170,16 +171,8 @@ impl FactNode {
                 .and_then(|v| serde_json::to_value(v).ok())
                 .and_then(|jv| {
                     jv.as_u64()
-                        .or_else(|| {
-                            jv.get("Int")
-                                .and_then(|i| i.as_i64())
-                                .map(|u| u as u64)
-                        })
-                        .or_else(|| {
-                            jv.get("Integer")
-                                .and_then(|i| i.as_i64())
-                                .map(|u| u as u64)
-                        })
+                        .or_else(|| jv.get("Int").and_then(|i| i.as_i64()).map(|u| u as u64))
+                        .or_else(|| jv.get("Integer").and_then(|i| i.as_i64()).map(|u| u as u64))
                 })
                 .unwrap_or(0)
         };
@@ -190,16 +183,8 @@ impl FactNode {
                 .and_then(|jv| {
                     jv.as_u64()
                         .map(|u| u as u32)
-                        .or_else(|| {
-                            jv.get("Int")
-                                .and_then(|i| i.as_i64())
-                                .map(|u| u as u32)
-                        })
-                        .or_else(|| {
-                            jv.get("Integer")
-                                .and_then(|i| i.as_i64())
-                                .map(|u| u as u32)
-                        })
+                        .or_else(|| jv.get("Int").and_then(|i| i.as_i64()).map(|u| u as u32))
+                        .or_else(|| jv.get("Integer").and_then(|i| i.as_i64()).map(|u| u as u32))
                 })
                 .unwrap_or(1)
         };
@@ -438,7 +423,7 @@ impl Context {
     pub fn apply_privacy_filter(&mut self) -> usize {
         let mut scrubbed_count = 0;
         let re = regex::Regex::new(r"(?s)<private>.*?</private>").unwrap();
-        
+
         for item in &mut self.items {
             if re.is_match(&item.content) {
                 item.content = re.replace_all(&item.content, "[REDACTED]").to_string();
@@ -766,23 +751,21 @@ impl ModelProvider for OllamaProvider {
         } else {
             // Attempt to query Ollama for the actual model context window
             match self.client.list_local_models().await {
-                Ok(models) => {
-                    models
-                        .into_iter()
-                        .find(|m| m.name == self.model || m.name.starts_with(&self.model))
-                        .map(|m| {
-                            if m.name.contains("qwen2.5-coder") {
-                                32768
-                            } else if m.name.contains("llama3.2") || m.name.contains("llama3.1") {
-                                131072
-                            } else if m.name.contains("mistral") {
-                                32768
-                            } else {
-                                2048
-                            }
-                        })
-                        .unwrap_or(2048)
-                }
+                Ok(models) => models
+                    .into_iter()
+                    .find(|m| m.name == self.model || m.name.starts_with(&self.model))
+                    .map(|m| {
+                        if m.name.contains("qwen2.5-coder") {
+                            32768
+                        } else if m.name.contains("llama3.2") || m.name.contains("llama3.1") {
+                            131072
+                        } else if m.name.contains("mistral") {
+                            32768
+                        } else {
+                            2048
+                        }
+                    })
+                    .unwrap_or(2048),
                 Err(_) => 2048,
             }
         };
@@ -827,7 +810,10 @@ impl ModelProvider for OllamaProvider {
         for msg in messages {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
             if role == "assistant" {
-                can_accept_tool = msg.get("tool_calls").map(|tc| !tc.is_null()).unwrap_or(false);
+                can_accept_tool = msg
+                    .get("tool_calls")
+                    .map(|tc| !tc.is_null())
+                    .unwrap_or(false);
             } else if role == "tool" {
                 if !can_accept_tool {
                     tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message.");
@@ -839,8 +825,6 @@ impl ModelProvider for OllamaProvider {
             sanitized.push(msg);
         }
         let mut messages = sanitized;
-
-
 
         messages.push(serde_json::json!({
             "role": "user",
@@ -930,7 +914,9 @@ impl ModelProvider for OllamaProvider {
                 if let Some(end) = content[start..].find("</tool_call>") {
                     let json_str = &content[start + 11..start + end];
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                        if let (Some(name), Some(args)) = (val["name"].as_str(), val["arguments"].as_object()) {
+                        if let (Some(name), Some(args)) =
+                            (val["name"].as_str(), val["arguments"].as_object())
+                        {
                             tool_calls.push(ToolCall {
                                 name: name.to_string(),
                                 arguments: serde_json::Value::Object(args.clone()),
@@ -940,15 +926,18 @@ impl ModelProvider for OllamaProvider {
                     }
                 }
             }
-            
+
             // 2. Try to find markdown JSON blocks
             if tool_calls.is_empty() {
                 if let Some(start) = content.find("```json") {
                     let search_area = &content[start + 7..];
                     if let Some(end) = search_area.find("```") {
                         let json_str = &search_area[..end];
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.trim()) {
-                             if let (Some(name), Some(args)) = (val["name"].as_str(), val["arguments"].as_object()) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.trim())
+                        {
+                            if let (Some(name), Some(args)) =
+                                (val["name"].as_str(), val["arguments"].as_object())
+                            {
                                 tool_calls.push(ToolCall {
                                     name: name.to_string(),
                                     arguments: serde_json::Value::Object(args.clone()),
@@ -961,8 +950,11 @@ impl ModelProvider for OllamaProvider {
                     let search_area = &content[start + 3..];
                     if let Some(end) = search_area.find("```") {
                         let json_str = &search_area[..end];
-                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.trim()) {
-                             if let (Some(name), Some(args)) = (val["name"].as_str(), val["arguments"].as_object()) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.trim())
+                        {
+                            if let (Some(name), Some(args)) =
+                                (val["name"].as_str(), val["arguments"].as_object())
+                            {
                                 tool_calls.push(ToolCall {
                                     name: name.to_string(),
                                     arguments: serde_json::Value::Object(args.clone()),
@@ -977,7 +969,9 @@ impl ModelProvider for OllamaProvider {
             // 3. Try to parse the whole content as JSON (some models just output raw JSON)
             if tool_calls.is_empty() {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(content.trim()) {
-                     if let (Some(name), Some(args)) = (val["name"].as_str(), val["arguments"].as_object()) {
+                    if let (Some(name), Some(args)) =
+                        (val["name"].as_str(), val["arguments"].as_object())
+                    {
                         tool_calls.push(ToolCall {
                             name: name.to_string(),
                             arguments: serde_json::Value::Object(args.clone()),
@@ -1027,10 +1021,15 @@ impl ModelProvider for OllamaProvider {
         for msg in messages {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
             if role == "assistant" {
-                can_accept_tool = msg.get("tool_calls").map(|tc| !tc.is_null()).unwrap_or(false);
+                can_accept_tool = msg
+                    .get("tool_calls")
+                    .map(|tc| !tc.is_null())
+                    .unwrap_or(false);
             } else if role == "tool" {
                 if !can_accept_tool {
-                    tracing::warn!("Ollama Provider: Dropping orphaned 'tool' message (streaming).");
+                    tracing::warn!(
+                        "Ollama Provider: Dropping orphaned 'tool' message (streaming)."
+                    );
                     continue;
                 }
             } else {
@@ -1039,7 +1038,6 @@ impl ModelProvider for OllamaProvider {
             sanitized.push(msg);
         }
         let mut messages = sanitized;
-
 
         messages.push(serde_json::json!({
             "role": "user",
@@ -1203,8 +1201,6 @@ struct AnthropicRequest {
     system: Option<String>,
 }
 
-
-
 #[derive(Serialize)]
 struct AnthropicTool {
     name: String,
@@ -1242,7 +1238,6 @@ enum AnthropicContent {
         content: String,
     },
 }
-
 
 #[derive(Deserialize)]
 struct AnthropicResponse {
@@ -1303,7 +1298,6 @@ impl LlmClient for AnthropicProvider {
             system: None,
         };
 
-
         let res = client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
@@ -1347,13 +1341,17 @@ impl ModelProvider for AnthropicProvider {
                     });
                 }
                 MemoryRole::Assistant => {
-                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                    let tool_calls: Option<Vec<ToolCall>> = item
+                        .metadata
+                        .get("tool_calls")
                         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
                     if let Some(tcs) = tool_calls {
                         let mut content_blocks = Vec::new();
                         if !item.content.is_empty() {
-                            content_blocks.push(AnthropicContent::Text { text: item.content.clone() });
+                            content_blocks.push(AnthropicContent::Text {
+                                text: item.content.clone(),
+                            });
                         }
                         for tc in tcs {
                             content_blocks.push(AnthropicContent::ToolUse {
@@ -1374,17 +1372,21 @@ impl ModelProvider for AnthropicProvider {
                     }
                 }
                 MemoryRole::Tool => {
-                    let tool_call_id = item.metadata.get("tool_call_id")
+                    let tool_call_id = item
+                        .metadata
+                        .get("tool_call_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
                         .to_string();
 
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
-                        content: AnthropicContentUnion::Multiple(vec![AnthropicContent::ToolResult {
-                            tool_use_id: tool_call_id,
-                            content: item.content.clone(),
-                        }]),
+                        content: AnthropicContentUnion::Multiple(vec![
+                            AnthropicContent::ToolResult {
+                                tool_use_id: tool_call_id,
+                                content: item.content.clone(),
+                            },
+                        ]),
                     });
                 }
             }
@@ -1398,23 +1400,23 @@ impl ModelProvider for AnthropicProvider {
         // --- SECONDARY SAFETY: Sanitize message sequence for Anthropic ---
         let mut sanitized = Vec::new();
         let mut can_accept_tool = false;
-        
+
         // DEBUG: Log the sequence we received
         let roles: Vec<String> = messages.iter().map(|m| m.role.clone()).collect();
         tracing::debug!("Anthropic Provider: Incoming roles: {:?}", roles);
 
         for msg in messages {
             let is_tool_response = match &msg.content {
-                AnthropicContentUnion::Multiple(blocks) => {
-                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolResult { .. }))
-                }
+                AnthropicContentUnion::Multiple(blocks) => blocks
+                    .iter()
+                    .any(|b| matches!(b, AnthropicContent::ToolResult { .. })),
                 _ => false,
             };
 
             let has_tool_use = match &msg.content {
-                AnthropicContentUnion::Multiple(blocks) => {
-                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
-                }
+                AnthropicContentUnion::Multiple(blocks) => blocks
+                    .iter()
+                    .any(|b| matches!(b, AnthropicContent::ToolUse { .. })),
                 _ => false,
             };
 
@@ -1422,7 +1424,9 @@ impl ModelProvider for AnthropicProvider {
                 can_accept_tool = true;
             } else if is_tool_response {
                 if !can_accept_tool {
-                    tracing::warn!("Anthropic Provider: Dropping orphaned tool result to avoid API error.");
+                    tracing::warn!(
+                        "Anthropic Provider: Dropping orphaned tool result to avoid API error."
+                    );
                     continue;
                 }
             } else {
@@ -1431,9 +1435,6 @@ impl ModelProvider for AnthropicProvider {
             sanitized.push(msg);
         }
         let messages = sanitized;
-
-
-
 
         let tools = req
             .tools
@@ -1453,7 +1454,6 @@ impl ModelProvider for AnthropicProvider {
             stream: false,
             system: system_prompt,
         };
-
 
         let res = client
             .post("https://api.anthropic.com/v1/messages")
@@ -1486,8 +1486,7 @@ impl ModelProvider for AnthropicProvider {
             }
         }
 
-
-                let usage = Some(ResponseUsage {
+        let usage = Some(ResponseUsage {
             prompt_tokens: data.usage.input_tokens,
             completion_tokens: data.usage.output_tokens,
             total_tokens: data.usage.input_tokens + data.usage.output_tokens,
@@ -1520,13 +1519,17 @@ impl ModelProvider for AnthropicProvider {
                     });
                 }
                 MemoryRole::Assistant => {
-                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                    let tool_calls: Option<Vec<ToolCall>> = item
+                        .metadata
+                        .get("tool_calls")
                         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
                     if let Some(tcs) = tool_calls {
                         let mut content_blocks = Vec::new();
                         if !item.content.is_empty() {
-                            content_blocks.push(AnthropicContent::Text { text: item.content.clone() });
+                            content_blocks.push(AnthropicContent::Text {
+                                text: item.content.clone(),
+                            });
                         }
                         for tc in tcs {
                             content_blocks.push(AnthropicContent::ToolUse {
@@ -1547,17 +1550,21 @@ impl ModelProvider for AnthropicProvider {
                     }
                 }
                 MemoryRole::Tool => {
-                    let tool_call_id = item.metadata.get("tool_call_id")
+                    let tool_call_id = item
+                        .metadata
+                        .get("tool_call_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
                         .to_string();
 
                     messages.push(AnthropicMessage {
                         role: "user".to_string(),
-                        content: AnthropicContentUnion::Multiple(vec![AnthropicContent::ToolResult {
-                            tool_use_id: tool_call_id,
-                            content: item.content.clone(),
-                        }]),
+                        content: AnthropicContentUnion::Multiple(vec![
+                            AnthropicContent::ToolResult {
+                                tool_use_id: tool_call_id,
+                                content: item.content.clone(),
+                            },
+                        ]),
                     });
                 }
             }
@@ -1573,16 +1580,16 @@ impl ModelProvider for AnthropicProvider {
         let mut can_accept_tool = false;
         for msg in messages {
             let is_tool_response = match &msg.content {
-                AnthropicContentUnion::Multiple(blocks) => {
-                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolResult { .. }))
-                }
+                AnthropicContentUnion::Multiple(blocks) => blocks
+                    .iter()
+                    .any(|b| matches!(b, AnthropicContent::ToolResult { .. })),
                 _ => false,
             };
 
             let has_tool_use = match &msg.content {
-                AnthropicContentUnion::Multiple(blocks) => {
-                    blocks.iter().any(|b| matches!(b, AnthropicContent::ToolUse { .. }))
-                }
+                AnthropicContentUnion::Multiple(blocks) => blocks
+                    .iter()
+                    .any(|b| matches!(b, AnthropicContent::ToolUse { .. })),
                 _ => false,
             };
 
@@ -1599,8 +1606,6 @@ impl ModelProvider for AnthropicProvider {
             sanitized.push(msg);
         }
         let messages = sanitized;
-
-
 
         let tools = req
             .tools
@@ -1620,7 +1625,6 @@ impl ModelProvider for AnthropicProvider {
             stream: true,
             system: system_prompt,
         };
-
 
         let res = client
             .post("https://api.anthropic.com/v1/messages")
@@ -1896,14 +1900,18 @@ impl ModelProvider for OpenAiProvider {
         // Multiple 'tool' messages can follow a single 'assistant' call.
         let mut sanitized = Vec::new();
         let mut can_accept_tool = false;
-        
+
         // DEBUG: Log the sequence we received
         let roles: Vec<String> = messages.iter().map(|m| m.role.clone()).collect();
         tracing::debug!("OpenAI Provider: Incoming roles: {:?}", roles);
 
         for msg in messages {
             if msg.role == "assistant" {
-                can_accept_tool = msg.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
+                can_accept_tool = msg
+                    .tool_calls
+                    .as_ref()
+                    .map(|tc| !tc.is_empty())
+                    .unwrap_or(false);
             } else if msg.role == "tool" {
                 if !can_accept_tool {
                     tracing::warn!(
@@ -1918,9 +1926,6 @@ impl ModelProvider for OpenAiProvider {
             sanitized.push(msg);
         }
         let mut messages = sanitized;
-
-
-
 
         messages.push(OpenAiMessage {
             role: "user".to_string(),
@@ -2033,7 +2038,11 @@ impl ModelProvider for OpenAiProvider {
         let mut can_accept_tool = false;
         for msg in messages {
             if msg.role == "assistant" {
-                can_accept_tool = msg.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
+                can_accept_tool = msg
+                    .tool_calls
+                    .as_ref()
+                    .map(|tc| !tc.is_empty())
+                    .unwrap_or(false);
             } else if msg.role == "tool" {
                 if !can_accept_tool {
                     tracing::warn!("OpenAI Provider: Dropping orphaned 'tool' message to prevent API error (streaming).");
@@ -2045,8 +2054,6 @@ impl ModelProvider for OpenAiProvider {
             sanitized.push(msg);
         }
         let mut messages = sanitized;
-
-
 
         messages.push(OpenAiMessage {
             role: "user".to_string(),
@@ -2238,13 +2245,11 @@ struct GeminiPart {
     function_response: Option<GeminiFunctionResponse>,
 }
 
-
 #[derive(Serialize, Deserialize)]
 struct GeminiFunctionResponse {
     name: String,
     response: serde_json::Value,
 }
-
 
 #[derive(Serialize, Deserialize)]
 struct GeminiFunctionCall {
@@ -2285,7 +2290,6 @@ impl LlmClient for GeminiProvider {
                 function_call: None,
                 function_response: None,
             }],
-
         }];
         let req = GeminiRequest {
             contents,
@@ -2332,7 +2336,9 @@ impl ModelProvider for GeminiProvider {
                     });
                 }
                 MemoryRole::Assistant => {
-                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                    let tool_calls: Option<Vec<ToolCall>> = item
+                        .metadata
+                        .get("tool_calls")
                         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
                     let mut parts = Vec::new();
@@ -2363,7 +2369,9 @@ impl ModelProvider for GeminiProvider {
                     });
                 }
                 MemoryRole::Tool => {
-                    let tool_name = item.metadata.get("tool_name")
+                    let tool_name = item
+                        .metadata
+                        .get("tool_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
                         .to_string();
@@ -2396,7 +2404,7 @@ impl ModelProvider for GeminiProvider {
         // --- SECONDARY SAFETY: Sanitize message sequence for Gemini ---
         let mut sanitized = Vec::new();
         let mut can_accept_tool = false;
-        
+
         // DEBUG: Log the sequence we received
         let roles: Vec<String> = contents.iter().map(|c| c.role.clone()).collect();
         tracing::debug!("Gemini Provider: Incoming roles: {:?}", roles);
@@ -2409,7 +2417,9 @@ impl ModelProvider for GeminiProvider {
                 can_accept_tool = true;
             } else if is_tool_response {
                 if !can_accept_tool {
-                    tracing::warn!("Gemini Provider: Dropping orphaned tool response to avoid API error.");
+                    tracing::warn!(
+                        "Gemini Provider: Dropping orphaned tool response to avoid API error."
+                    );
                     continue;
                 }
             } else {
@@ -2419,9 +2429,6 @@ impl ModelProvider for GeminiProvider {
         }
         let mut contents = sanitized;
 
-
-
-
         contents.push(GeminiContent {
             role: "user".to_string(),
             parts: vec![GeminiPart {
@@ -2429,7 +2436,6 @@ impl ModelProvider for GeminiProvider {
                 function_call: None,
                 function_response: None,
             }],
-
         });
 
         let tools = if req.tools.is_empty() {
@@ -2514,7 +2520,9 @@ impl ModelProvider for GeminiProvider {
                     });
                 }
                 MemoryRole::Assistant => {
-                    let tool_calls: Option<Vec<ToolCall>> = item.metadata.get("tool_calls")
+                    let tool_calls: Option<Vec<ToolCall>> = item
+                        .metadata
+                        .get("tool_calls")
                         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
                     let mut parts = Vec::new();
@@ -2545,7 +2553,9 @@ impl ModelProvider for GeminiProvider {
                     });
                 }
                 MemoryRole::Tool => {
-                    let tool_name = item.metadata.get("tool_name")
+                    let tool_name = item
+                        .metadata
+                        .get("tool_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
                         .to_string();
@@ -2595,9 +2605,6 @@ impl ModelProvider for GeminiProvider {
             sanitized.push(msg);
         }
         let contents = sanitized;
-
-
-
 
         let tools = if req.tools.is_empty() {
             vec![]
@@ -2653,11 +2660,11 @@ impl ModelProvider for GeminiProvider {
                                     total_tokens: u.total_tokens,
                                 });
 
-                                yield ResponseChunk { 
-                                    content_delta, 
-                                    tool_call_delta, 
+                                yield ResponseChunk {
+                                    content_delta,
+                                    tool_call_delta,
                                     usage,
-                                    is_final: false 
+                                    is_final: false
                                 };
                             }
                         }

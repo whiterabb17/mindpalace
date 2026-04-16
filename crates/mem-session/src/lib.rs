@@ -1,11 +1,13 @@
-use mem_core::{MemoryLayer, Context, LlmClient, MemoryItem, MemoryRole, StorageBackend, MindPalaceConfig};
 use async_trait::async_trait;
+use mem_core::{
+    Context, LlmClient, MemoryItem, MemoryLayer, MemoryRole, MindPalaceConfig, StorageBackend,
+};
 use std::sync::Arc;
 
 /// A memory layer that compresses historical conversation segments into narrative summaries.
 ///
-/// The SessionSummarizer prevents short-term memory bloat by periodically iterating 
-/// over the current context, generating a high-fidelity summary of older messages, 
+/// The SessionSummarizer prevents short-term memory bloat by periodically iterating
+/// over the current context, generating a high-fidelity summary of older messages,
 /// and replacing them with a single summary item.
 pub struct SessionSummarizer<S: StorageBackend> {
     /// Client for model calls during summary generation.
@@ -39,9 +41,15 @@ impl<S: StorageBackend> SessionSummarizer<S> {
     }
 
     /// Validates the generated summary against the original context for fidelity.
-    pub async fn validate_summary_fidelity(&self, summary: &str, context: &Context) -> anyhow::Result<bool> {
+    pub async fn validate_summary_fidelity(
+        &self,
+        summary: &str,
+        context: &Context,
+    ) -> anyhow::Result<bool> {
         let mut history = String::new();
-        for item in &context.items { history.push_str(&format!("{:?}: {}\n", item.role, item.content)); }
+        for item in &context.items {
+            history.push_str(&format!("{:?}: {}\n", item.role, item.content));
+        }
         let prompt = format!("Verify if summary retains all critical facts without hallucinations. Return 'PASS' or 'FAIL: [reason]'.\n\nHISTORY:\n{}\n\nSUMMARY:\n{}", history, summary);
         let res = self.llm.completion(&prompt).await?;
         Ok(res.contains("PASS"))
@@ -79,7 +87,7 @@ impl<S: StorageBackend> MemoryLayer for SessionSummarizer<S> {
 
         // 1. Generate summary.
         let summary = self.generate_summary(context).await?;
-        
+
         // 2. Perform fidelity validation if enabled.
         if self.validation_mode && !self.validate_summary_fidelity(&summary, context).await? {
             tracing::warn!("Summary fidelity check FAILED. Retaining original context.");
@@ -95,7 +103,7 @@ impl<S: StorageBackend> MemoryLayer for SessionSummarizer<S> {
         // Calculation ensures that latest messages are retained while the history is condensed.
         let cutoff_idx = (context.items.len() as f32 * self.config.compression_ratio) as usize;
         let original_count = context.items.len();
-        
+
         let summary_item = MemoryItem {
             role: MemoryRole::System,
             content: format!("### SESSION NARRATIVE SUMMARY ###\n\n{}", summary),

@@ -1,5 +1,5 @@
-use mem_core::{MemoryLayer, Context, MemoryRole, RelevanceAnalyzer, MindPalaceConfig};
 use async_trait::async_trait;
+use mem_core::{Context, MemoryLayer, MemoryRole, MindPalaceConfig, RelevanceAnalyzer};
 use std::sync::Arc;
 
 /// Strategy for determining how a memory item's Time-To-Live (TTL) decays over time.
@@ -14,8 +14,8 @@ pub enum TTLDecayStrategy {
 
 /// A short-term memory layer that prunes context based on age and local relevance.
 ///
-/// Unlike naive TTL, the AdaptiveMicroCompactor uses a `RelevanceAnalyzer` to 
-/// provide "stickiness" to important recent messages, extending their TTL 
+/// Unlike naive TTL, the AdaptiveMicroCompactor uses a `RelevanceAnalyzer` to
+/// provide "stickiness" to important recent messages, extending their TTL
 /// even if they exceed the base age threshold.
 pub struct AdaptiveMicroCompactor {
     /// System-wide configuration for thresholds and limits.
@@ -28,7 +28,11 @@ pub struct AdaptiveMicroCompactor {
 
 impl AdaptiveMicroCompactor {
     /// Initializes a new AdaptiveMicroCompactor with the specified configuration and decay strategy.
-    pub fn new(config: MindPalaceConfig, decay_function: TTLDecayStrategy, relevance_analyzer: Arc<dyn RelevanceAnalyzer>) -> Self {
+    pub fn new(
+        config: MindPalaceConfig,
+        decay_function: TTLDecayStrategy,
+        relevance_analyzer: Arc<dyn RelevanceAnalyzer>,
+    ) -> Self {
         Self {
             config,
             decay_function,
@@ -48,7 +52,7 @@ impl MemoryLayer for AdaptiveMicroCompactor {
     /// System-level messages are always retained (immortal).
     async fn process(&self, context: &mut Context) -> anyhow::Result<()> {
         let now = chrono::Utc::now().timestamp() as u64;
-        
+
         let mut to_remove = Vec::new();
 
         for (idx, item) in context.items.iter().enumerate() {
@@ -58,8 +62,11 @@ impl MemoryLayer for AdaptiveMicroCompactor {
             }
 
             let age = now.saturating_sub(item.timestamp);
-            let relevance = self.relevance_analyzer.score_relevance(item, context).await?;
-            
+            let relevance = self
+                .relevance_analyzer
+                .score_relevance(item, context)
+                .await?;
+
             // Adjust TTL based on relevance and the chosen strategy.
             let effective_ttl = match &self.decay_function {
                 TTLDecayStrategy::AdaptiveByType => {
@@ -75,17 +82,17 @@ impl MemoryLayer for AdaptiveMicroCompactor {
                     (self.config.base_ttl_seconds as f32 * decay * (1.0 + relevance)) as u64
                 }
             };
-            
+
             if age > effective_ttl {
                 to_remove.push(idx);
             }
         }
-        
+
         // Remove stale items in reverse order to preserve indexing stability.
         for idx in to_remove.into_iter().rev() {
             context.items.remove(idx);
         }
-        
+
         Ok(())
     }
 

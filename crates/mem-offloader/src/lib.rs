@@ -1,7 +1,7 @@
-use mem_core::{MemoryLayer, Context, StorageBackend, MemoryRole};
 use async_trait::async_trait;
-use sha2::{Sha256, Digest};
-use serde::{Serialize, Deserialize};
+use mem_core::{Context, MemoryLayer, MemoryRole, StorageBackend};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OffloaderConfig {
@@ -53,16 +53,15 @@ impl<S: StorageBackend> MemoryLayer for ToolOffloader<S> {
                         self.storage.store(&id, item.content.as_bytes()).await?;
 
                         // 3. Create context-friendly stub (Unicode-safe preview)
-                        let preview: String = item.content.chars().take(self.config.preview_len).collect();
+                        let preview: String =
+                            item.content.chars().take(self.config.preview_len).collect();
                         item.content = format!(
                             "[Large Output Offloaded to Storage. Hash: {}. Preview: {}...]",
                             hash, preview
                         );
-                        
+
                         // 4. Update metadata for auditability
-                        let mut meta = item.metadata.as_object_mut()
-                            .cloned()
-                            .unwrap_or_default();
+                        let mut meta = item.metadata.as_object_mut().cloned().unwrap_or_default();
                         meta.insert("offloaded".to_string(), serde_json::Value::Bool(true));
                         meta.insert("storage_id".to_string(), serde_json::Value::String(id));
                         item.metadata = serde_json::Value::Object(meta);
@@ -89,7 +88,10 @@ mod tests {
     async fn test_offload_threshold() {
         let dir = tempdir().unwrap();
         let storage = FileStorage::new(dir.path().to_path_buf());
-        let config = OffloaderConfig { threshold: 10, preview_len: 5 };
+        let config = OffloaderConfig {
+            threshold: 10,
+            preview_len: 5,
+        };
         let offloader = ToolOffloader::new(storage, config);
 
         let mut context = Context {
@@ -117,10 +119,10 @@ mod tests {
         // Verify the long message is stubbed
         assert!(context.items[1].content.contains("Offloaded"));
         assert!(context.items[1].content.contains("this ")); // Preview check
-        
+
         // Verify metadata was updated
         assert_eq!(context.items[1].metadata["offloaded"], true);
-        
+
         // Verify physical file exists
         let storage_id = context.items[1].metadata["storage_id"].as_str().unwrap();
         assert!(dir.path().join(storage_id).exists());
@@ -130,7 +132,10 @@ mod tests {
     async fn test_cas_deduplication() {
         let dir = tempdir().unwrap();
         let storage = FileStorage::new(dir.path().to_path_buf());
-        let config = OffloaderConfig { threshold: 5, preview_len: 5 };
+        let config = OffloaderConfig {
+            threshold: 5,
+            preview_len: 5,
+        };
         let offloader = ToolOffloader::new(storage, config);
 
         let content = "identical large content";
@@ -155,7 +160,7 @@ mod tests {
 
         let hash_1 = &context.items[0].metadata["storage_id"];
         let hash_2 = &context.items[1].metadata["storage_id"];
-        
+
         // Verify hashes are identical (CAS)
         assert_eq!(hash_1, hash_2);
     }

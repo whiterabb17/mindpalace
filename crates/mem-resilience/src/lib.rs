@@ -1,8 +1,8 @@
-use mem_core::{Context, StorageBackend};
 use brain::Brain;
+use mem_core::{Context, StorageBackend};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 /// Represents the internal state of a circuit breaker.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -17,8 +17,8 @@ pub enum CircuitState {
 
 /// A resilience mechanism for protecting LLM and storage backends from failure cascades.
 ///
-/// The CircuitBreaker monitors for repeated failures, enters an `Open` state 
-/// to save the error budget when a threshold is tripped, and automatically 
+/// The CircuitBreaker monitors for repeated failures, enters an `Open` state
+/// to save the error budget when a threshold is tripped, and automatically
 /// attempts a transition back to `Closed` after a reset timeout.
 pub struct CircuitBreaker {
     /// Shared state indicator.
@@ -88,8 +88,8 @@ impl CircuitBreaker {
 
 /// A higher-level orchestrator adding resilience and safety logic to memory operations.
 ///
-/// The ResilientMemoryController wraps the `Brain` and provides automatic 
-/// emergency snapshotting on failure, while respecting CircuitBreaker policies 
+/// The ResilientMemoryController wraps the `Brain` and provides automatic
+/// emergency snapshotting on failure, while respecting CircuitBreaker policies
 /// to avoid death spirals during backend outages.
 pub struct ResilientMemoryController<S: StorageBackend> {
     /// The core orchestrator instance.
@@ -106,7 +106,10 @@ impl<S: StorageBackend> ResilientMemoryController<S> {
         Self {
             brain,
             storage,
-            circuit_breaker: Arc::new(CircuitBreaker::new(failure_threshold, Duration::from_secs(30))),
+            circuit_breaker: Arc::new(CircuitBreaker::new(
+                failure_threshold,
+                Duration::from_secs(30),
+            )),
         }
     }
 
@@ -116,7 +119,9 @@ impl<S: StorageBackend> ResilientMemoryController<S> {
     /// If optimization fails, an emergency snapshot is created automatically for forensics.
     pub async fn optimize_resilient(&self, context: &mut Context) -> anyhow::Result<()> {
         if !self.circuit_breaker.can_proceed().await {
-            tracing::warn!("Circuit breaker OPEN. Skipping memory optimization to save error budget.");
+            tracing::warn!(
+                "Circuit breaker OPEN. Skipping memory optimization to save error budget."
+            );
             return Ok(()); // Graceful degradation.
         }
 
@@ -126,14 +131,17 @@ impl<S: StorageBackend> ResilientMemoryController<S> {
                 Ok(())
             }
             Err(e) => {
-                tracing::error!("Memory optimization failed: {:?}. Reporting to circuit breaker.", e);
+                tracing::error!(
+                    "Memory optimization failed: {:?}. Reporting to circuit breaker.",
+                    e
+                );
                 self.circuit_breaker.report_failure().await;
-                
+
                 // Gap 9: Creating emergency snapshot on failure for recovery.
                 if let Err(snapshot_err) = self.create_emergency_snapshot(context).await {
                     tracing::error!("Failed to create emergency snapshot: {:?}", snapshot_err);
                 }
-                
+
                 Err(e)
             }
         }

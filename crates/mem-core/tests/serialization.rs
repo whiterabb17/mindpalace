@@ -7,7 +7,7 @@ fn test_fact_graph_serialization_roundtrip() {
         "The capital of France is Paris".to_string(),
         "Geography".to_string(),
         1.0,
-        "session-1".to_string()
+        "session-1".to_string(),
     );
     let fact_id = fact.id.clone();
     graph.add_fact(fact).unwrap();
@@ -16,8 +16,10 @@ fn test_fact_graph_serialization_roundtrip() {
     println!("Serialized: {}", serialized);
 
     let deserialized: FactGraph = serde_json::from_str(&serialized).unwrap();
-    let recovered_fact = deserialized.get_fact(&fact_id).expect("Fact not found after deserialization");
-    
+    let recovered_fact = deserialized
+        .get_fact(&fact_id)
+        .expect("Fact not found after deserialization");
+
     assert_eq!(recovered_fact.content, "The capital of France is Paris");
     assert_eq!(recovered_fact.category, "Geography");
 }

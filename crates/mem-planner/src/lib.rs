@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 pub const PLAN_BOILERPLATE_TASKS: &str = "I have planned the next steps to achieve the goal.";
-pub const PLAN_BOILERPLATE_NO_TASKS: &str = "I have reviewed the state and the goal is achieved. No further tasks are required.";
+pub const PLAN_BOILERPLATE_NO_TASKS: &str =
+    "I have reviewed the state and the goal is achieved. No further tasks are required.";
 
 /// Unique identifier for a task in the execution graph.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -125,7 +126,13 @@ impl ExecutionPlan {
 #[async_trait]
 pub trait PlannerEngine: Send + Sync {
     /// Generates a structured execution plan based on the current context, goal, and available tools.
-    async fn plan(&self, goal: &str, context: &Context, tools: Vec<mem_core::ToolDefinition>, todo_state: Option<&str>) -> anyhow::Result<ExecutionPlan>;
+    async fn plan(
+        &self,
+        goal: &str,
+        context: &Context,
+        tools: Vec<mem_core::ToolDefinition>,
+        todo_state: Option<&str>,
+    ) -> anyhow::Result<ExecutionPlan>;
 }
 
 /// A production-grade LLM-driven planner.
@@ -141,7 +148,13 @@ impl LlmPlanner {
 
 #[async_trait]
 impl PlannerEngine for LlmPlanner {
-    async fn plan(&self, goal: &str, context: &Context, tools: Vec<mem_core::ToolDefinition>, todo_state: Option<&str>) -> anyhow::Result<ExecutionPlan> {
+    async fn plan(
+        &self,
+        goal: &str,
+        context: &Context,
+        tools: Vec<mem_core::ToolDefinition>,
+        todo_state: Option<&str>,
+    ) -> anyhow::Result<ExecutionPlan> {
         let context_json = serde_json::to_string_pretty(context)?;
         let todo_info = todo_state.unwrap_or("No current TODO state.");
         let tools_json = serde_json::to_string_pretty(&tools)?;
@@ -212,7 +225,7 @@ JSON OUTPUT:
         let response = self.client.complete(req).await?;
         let usage = response.usage.clone();
         let content = response.content;
-        
+
         // --- PROMPT ECHO STRIPPING ---
         // Some small models repeat the prompt. We strip everything up to the first JSON brace.
         let mut clean_response = content.trim();
@@ -220,7 +233,10 @@ JSON OUTPUT:
             // Check if we have a preamble that looks like an echo
             let preamble = &clean_response[..start_brace];
             if preamble.contains("GOAL:") || preamble.contains("User:") || preamble.len() > 100 {
-                tracing::info!("Detected and stripped potential prompt echo of length {}", preamble.len());
+                tracing::info!(
+                    "Detected and stripped potential prompt echo of length {}",
+                    preamble.len()
+                );
                 clean_response = &clean_response[start_brace..];
             }
         }
@@ -244,19 +260,27 @@ JSON OUTPUT:
                     if plan.tasks.is_empty() {
                         plan.content = PLAN_BOILERPLATE_NO_TASKS.into();
                     } else {
-                        plan.content = PLAN_BOILERPLATE_TASKS.into(); 
+                        plan.content = PLAN_BOILERPLATE_TASKS.into();
                     }
                 }
-                tracing::info!(tasks_count = plan.tasks.len(), "Execution plan parsed successfully");
+                tracing::info!(
+                    tasks_count = plan.tasks.len(),
+                    "Execution plan parsed successfully"
+                );
                 Ok(plan)
             }
             Err(e) => {
-                tracing::warn!("Failed to parse execution plan JSON: {}. Attempting fallback recovery.", e);
+                tracing::warn!(
+                    "Failed to parse execution plan JSON: {}. Attempting fallback recovery.",
+                    e
+                );
                 // Fallback: If it's not JSON, only use it as content if it's NOT an echo
                 if content.contains(&goal[..goal.len().min(20)]) {
-                     Ok(ExecutionPlan {
+                    Ok(ExecutionPlan {
                         tasks: std::collections::HashMap::new(),
-                        content: "I'm sorry, I encountered an error parsing the plan. Please try again.".into(),
+                        content:
+                            "I'm sorry, I encountered an error parsing the plan. Please try again."
+                                .into(),
                         requires_approval: false,
                         usage,
                     })
@@ -335,7 +359,14 @@ mod tests {
         assert_eq!(plan.tasks.len(), 2);
         assert!(plan.tasks.contains_key(&TaskId("task_1".into())));
         assert!(plan.tasks.contains_key(&TaskId("task_2".into())));
-        assert_eq!(plan.tasks.get(&TaskId("task_2".into())).unwrap().dependencies[0].0, "task_1");
+        assert_eq!(
+            plan.tasks
+                .get(&TaskId("task_2".into()))
+                .unwrap()
+                .dependencies[0]
+                .0,
+            "task_1"
+        );
     }
 
     #[test]

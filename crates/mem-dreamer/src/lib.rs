@@ -1,17 +1,17 @@
-use mem_core::{MemoryLayer, Context, LlmClient, StorageBackend, MindPalaceConfig};
 use async_trait::async_trait;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fs4::FileExt;
+use mem_core::{Context, LlmClient, MemoryLayer, MindPalaceConfig, StorageBackend};
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 
 /// A background worker for deep-review and consolidation of session history.
 ///
-/// The DreamWorker performs "offline" analysis of past conversation sessions, 
-/// synthesizing high-level structural knowledge and persisting it as 
+/// The DreamWorker performs "offline" analysis of past conversation sessions,
+/// synthesizing high-level structural knowledge and persisting it as
 /// consolidated markdown files in the `knowledge/` directory.
 pub struct DreamWorker<S: StorageBackend> {
     /// Client for model calls during memory synthesis.
@@ -26,13 +26,23 @@ pub struct DreamWorker<S: StorageBackend> {
 
 impl<S: StorageBackend> DreamWorker<S> {
     /// Initializes a new DreamWorker with the specified backend and configuration.
-    pub fn new(llm: Arc<dyn LlmClient>, storage: S, config: MindPalaceConfig, lock_path: PathBuf) -> Self {
-        Self { llm, storage, config, lock_path }
+    pub fn new(
+        llm: Arc<dyn LlmClient>,
+        storage: S,
+        config: MindPalaceConfig,
+        lock_path: PathBuf,
+    ) -> Self {
+        Self {
+            llm,
+            storage,
+            config,
+            lock_path,
+        }
     }
 
     /// Executes a single consolidation cycle across all historical sessions.
     ///
-    /// This method performs exclusive file-locking and summarizes session 
+    /// This method performs exclusive file-locking and summarizes session
     /// patterns into durable knowledge markdown files.
     pub async fn run_dream_cycle(&self) -> anyhow::Result<()> {
         let file = File::create(&self.lock_path)?;
@@ -44,10 +54,14 @@ impl<S: StorageBackend> DreamWorker<S> {
         // Iterative review of conversation history files.
         let sessions = self.storage.list("sessions/").await?;
         for session_name in sessions {
-            if !session_name.ends_with(".json") { continue; }
+            if !session_name.ends_with(".json") {
+                continue;
+            }
             let session_id = format!("sessions/{}", session_name);
             let data = self.storage.retrieve(&session_id).await?;
-            if data.is_empty() { continue; }
+            if data.is_empty() {
+                continue;
+            }
             let context: Context = match serde_json::from_slice(&data) {
                 Ok(c) => c,
                 Err(e) => {
@@ -70,11 +84,13 @@ impl<S: StorageBackend> DreamWorker<S> {
             );
 
             let synthesis = self.llm.completion(&prompt).await?;
-            
+
             // Persist synthesis results (stored as narrative/knowledge expansion) for Layer 6.
             let synthesis_path = format!("knowledge/synthesis_{}.md", session_name);
-            self.storage.store(&synthesis_path, synthesis.as_bytes()).await?;
-            
+            self.storage
+                .store(&synthesis_path, synthesis.as_bytes())
+                .await?;
+
             tracing::info!("Consolidated session knowledge into: {}", synthesis_path);
         }
 
@@ -105,7 +121,10 @@ impl<S: StorageBackend + 'static> DreamScheduler<S> {
 
     /// Returns the current Unix timestamp in seconds.
     fn now() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
     /// Updates the `last_activity` timestamp to reflect new user interaction.
@@ -128,7 +147,10 @@ impl<S: StorageBackend + 'static> DreamScheduler<S> {
 
                 // Trigger dream cycle when idleness exceeds the threshold.
                 if idle_time > idle_threshold {
-                    tracing::info!("Triggering background memory consolidation after {}s idleness", idle_time);
+                    tracing::info!(
+                        "Triggering background memory consolidation after {}s idleness",
+                        idle_time
+                    );
                     if let Err(e) = worker.run_dream_cycle().await {
                         tracing::error!("Consolidation cycle failed: {:?}", e);
                     }
@@ -151,9 +173,15 @@ impl<S: StorageBackend + 'static> DreamScheduler<S> {
 
 #[async_trait]
 impl<S: StorageBackend> MemoryLayer for DreamWorker<S> {
-    fn name(&self) -> &str { "DreamWorker" }
+    fn name(&self) -> &str {
+        "DreamWorker"
+    }
     /// DreamWorker process does nothing in the active context pipeline; it runs offline.
-    async fn process(&self, _context: &mut Context) -> anyhow::Result<()> { Ok(()) }
+    async fn process(&self, _context: &mut Context) -> anyhow::Result<()> {
+        Ok(())
+    }
     /// Lowest priority ensures this layer doesn't interfere with real-time operations.
-    fn priority(&self) -> u32 { 6 }
+    fn priority(&self) -> u32 {
+        6
+    }
 }
