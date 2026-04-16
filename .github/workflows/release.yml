@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.0' # Trigger on vX.Y.0 tags
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  build-binaries:
+    name: Build Binaries (${{ matrix.os }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: mindpalace-linux
+            asset_name: mindpalace-linux.tar.gz
+          - os: windows-latest
+            artifact_name: mindpalace-windows
+            asset_name: mindpalace-windows.zip
+          - os: macos-latest
+            artifact_name: mindpalace-macos
+            asset_name: mindpalace-macos.tar.gz
+    
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+      
+      - name: Build All Binaries
+        run: cargo build --release --workspace
+
+      - name: Archive Binaries (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p bin-out
+          find target/release -maxdepth 1 -type f -executable -exec cp {} bin-out/ \;
+          tar -czvf ${{ matrix.asset_name }} bin-out/
+        
+      - name: Archive Binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path bin-out
+          Get-ChildItem target/release/*.exe | Copy-Item -Destination bin-out
+          Compress-Archive -Path bin-out/* -DestinationPath ${{ matrix.asset_name }}
+      
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
