@@ -48,18 +48,18 @@ impl CircuitBreaker {
     /// Determines if a request is allowed to proceed based on the circuit state.
     pub async fn can_proceed(&self) -> bool {
         let mut state = self.state.lock().await;
-        if *state == CircuitState::Open {
-            let last_fail = self.last_failure.lock().await;
-            if let Some(instant) = *last_fail {
-                // Check if the recovery timeout has elapsed.
-                if instant.elapsed() > self.reset_timeout {
-                    *state = CircuitState::HalfOpen;
-                    return true;
-                }
-            }
-            return false;
+        if *state != CircuitState::Open {
+            return true;
         }
-        true
+
+        let last_fail = self.last_failure.lock().await;
+        if let Some(instant) = *last_fail {
+            if instant.elapsed() > self.reset_timeout {
+                *state = CircuitState::HalfOpen;
+                return true;
+            }
+        }
+        false
     }
 
     /// Signals a successful operation, potentially closing a half-open circuit.

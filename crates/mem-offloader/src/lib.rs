@@ -41,31 +41,31 @@ impl<S: StorageBackend> MemoryLayer for ToolOffloader<S> {
         for item in &mut context.items {
             // Memory conservation: Only offload tool or assistant outputs which tend to be the bulkiest
             match item.role {
-                MemoryRole::Assistant | MemoryRole::Tool => {
-                    if item.content.len() > self.config.threshold {
-                        // 1. Content Addressable Hashing
-                        let mut hasher = Sha256::new();
-                        hasher.update(item.content.as_bytes());
-                        let hash = format!("{:x}", hasher.finalize());
-                        let id = format!("blobs/{}", hash);
+                MemoryRole::Assistant | MemoryRole::Tool
+                    if item.content.len() > self.config.threshold =>
+                {
+                    // 1. Content Addressable Hashing
+                    let mut hasher = Sha256::new();
+                    hasher.update(item.content.as_bytes());
+                    let hash = format!("{:x}", hasher.finalize());
+                    let id = format!("blobs/{}", hash);
 
-                        // 2. Persist to storage (Shared Backend)
-                        self.storage.store(&id, item.content.as_bytes()).await?;
+                    // 2. Persist to storage (Shared Backend)
+                    self.storage.store(&id, item.content.as_bytes()).await?;
 
-                        // 3. Create context-friendly stub (Unicode-safe preview)
-                        let preview: String =
-                            item.content.chars().take(self.config.preview_len).collect();
-                        item.content = format!(
-                            "[Large Output Offloaded to Storage. Hash: {}. Preview: {}...]",
-                            hash, preview
-                        );
+                    // 3. Create context-friendly stub (Unicode-safe preview)
+                    let preview: String =
+                        item.content.chars().take(self.config.preview_len).collect();
+                    item.content = format!(
+                        "[Large Output Offloaded to Storage. Hash: {}. Preview: {}...]",
+                        hash, preview
+                    );
 
-                        // 4. Update metadata for auditability
-                        let mut meta = item.metadata.as_object_mut().cloned().unwrap_or_default();
-                        meta.insert("offloaded".to_string(), serde_json::Value::Bool(true));
-                        meta.insert("storage_id".to_string(), serde_json::Value::String(id));
-                        item.metadata = serde_json::Value::Object(meta);
-                    }
+                    // 4. Update metadata for auditability
+                    let mut meta = item.metadata.as_object_mut().cloned().unwrap_or_default();
+                    meta.insert("offloaded".to_string(), serde_json::Value::Bool(true));
+                    meta.insert("storage_id".to_string(), serde_json::Value::String(id));
+                    item.metadata = serde_json::Value::Object(meta);
                 }
                 _ => {}
             }

@@ -167,6 +167,7 @@ impl VectorStore for RuVectorStore {
         let mut filtered = Vec::new();
         for result in results {
             if let Some(fact) = metadata.get(&result.id) {
+                // Category filter: skip if category is specified but doesn't match
                 if let Some(ref cat) = category {
                     if &fact.category != cat {
                         continue;
