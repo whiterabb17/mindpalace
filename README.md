@@ -1,4 +1,5 @@
 # MindPalace (v0.4.0): The 8-Layer Agent Memory Ecosystem
+## claude-mem in rust
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Rust](https://img.shields.io/badge/language-Rust-orange.svg) ![Status: Production-Ready](https://img.shields.io/badge/Status-Production--Ready-brightgreen.svg) ![Memory Architecture: 7-Layer Relational](https://img.shields.io/badge/Architecture-7--Layer--Relational-magenta.svg)
 
